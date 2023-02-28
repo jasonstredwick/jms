@@ -9,10 +9,9 @@
 #include <vector>
 
 #include <fmt/core.h>
-#include "include_config.hpp"
-#include "vulkan/vulkan_raii.hpp"
 
-#include "debug.hpp"
+#include "vulkan.hpp"
+#include "debug/default.hpp"
 #include "memory.hpp"
 #include "render_info.hpp"
 #include "shader.hpp"
