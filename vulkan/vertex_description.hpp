@@ -6,8 +6,7 @@
 #include <type_traits>
 #include <vector>
 
-#include "include_config.hpp"
-#include "vulkan/vulkan_raii.hpp"
+#include "jms/vulkan/vulkan.hpp"
 
 
 namespace jms {

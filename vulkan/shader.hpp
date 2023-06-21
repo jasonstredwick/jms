@@ -8,13 +8,28 @@
 #include <vector>
 
 #include <fmt/core.h>
-#include "include_config.hpp"
-#include <vulkan/vulkan_raii.hpp>
+
+#include "jms/vulkan/vulkan.hpp"
 
 
 namespace jms {
 namespace vulkan {
 namespace shader {
+
+
+struct Info {
+    vk::raii::ShaderModule shader_module;
+    vk::ShaderStageFlagBits stage;
+    std::string entry_point_name;
+
+    vk::PipelineShaderStageCreateInfo ToCreateInfo() const {
+        return {
+            .stage=stage,
+            .module=*shader_module,
+            .pName=entry_point_name.c_str()
+        };
+    }
+};
 
 
 vk::raii::ShaderModule Load(const std::filesystem::path& path, const vk::raii::Device& device) {

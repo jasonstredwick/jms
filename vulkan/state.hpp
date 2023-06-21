@@ -1,3 +1,6 @@
+#pragma once
+
+
 #include <algorithm>
 #include <exception>
 #include <iterator>
@@ -10,12 +13,12 @@
 
 #include <fmt/core.h>
 
-#include "vulkan.hpp"
-#include "debug/default.hpp"
-#include "memory.hpp"
-#include "render_info.hpp"
-#include "shader.hpp"
-#include "vertex_description.hpp"
+#include "jms/vulkan/vulkan.hpp"
+#include "jms/vulkan/debug/default.hpp"
+#include "jms/vulkan/memory.hpp"
+#include "jms/vulkan/render_info.hpp"
+#include "jms/vulkan/shader.hpp"
+#include "jms/vulkan/vertex_description.hpp"
 
 
 namespace jms {
@@ -53,8 +56,8 @@ struct State {
     jms::vulkan::RenderInfo render_info{};
     std::vector<vk::raii::Device> devices{};
     std::vector<vk::raii::RenderPass> render_passes{};
-    vk::Viewport viewport{};
-    vk::Rect2D scissor{};
+    std::vector<vk::Viewport> viewports{};
+    std::vector<vk::Rect2D> scissors{};
     std::vector<vk::raii::DescriptorSetLayout> descriptor_set_layouts{};
     std::vector<vk::raii::PipelineLayout> pipeline_layouts{};
     std::vector<vk::raii::Pipeline> pipelines{};
@@ -90,7 +93,7 @@ struct State {
                     const vk::Flags<vk::MemoryPropertyFlagBits> memory_prop_bits,
                     const vk::raii::PhysicalDevice& physical_device,
                     const vk::raii::Device& device);
-    void InitPipeline(const vk::raii::Device& device, const vk::raii::RenderPass& render_pass, const vk::Extent2D target_extent, const VertexDescription& vertex_desc, const std::vector<vk::DescriptorSetLayoutBinding>& layout_bindings);
+    void InitPipeline(const vk::raii::Device& device, const vk::raii::RenderPass& render_pass, const vk::Extent2D target_extent, const VertexDescription& vertex_desc, const std::vector<vk::DescriptorSetLayoutBinding>& layout_bindings, const std::vector<jms::vulkan::shader::Info>& shaders);
     void InitQueues(const vk::raii::Device& device, const uint32_t queue_family_index);
     void InitRenderPass(const vk::raii::Device& device, const vk::Format pixel_format, const vk::Extent2D target_extent);
     void InitSwapchain(const vk::raii::Device& device, const jms::vulkan::RenderInfo& render_info, const vk::raii::SurfaceKHR& surface, const vk::raii::RenderPass& render_pass);
@@ -185,6 +188,7 @@ void State::InitMemory(const size_t size_in_bytes,
                        const vk::Flags<vk::MemoryPropertyFlagBits> memory_prop_bits,
                        const vk::raii::PhysicalDevice& physical_device,
                        const vk::raii::Device& device) {
+#if 0
     buffers.push_back(vk::raii::Buffer{device, {
         .size=size_in_bytes,
         .usage=buffer_usage_bits,
@@ -200,6 +204,7 @@ void State::InitMemory(const size_t size_in_bytes,
     }));
 
     buffer.bindMemory(*(device_memory.back()), 0);
+#endif
 }
 
 
@@ -207,21 +212,12 @@ void State::InitPipeline(const vk::raii::Device& device,
                          const vk::raii::RenderPass& render_pass,
                          const vk::Extent2D target_extent,
                          const VertexDescription& vertex_desc,
-                         const std::vector<vk::DescriptorSetLayoutBinding>& layout_bindings) {
-    vk::raii::ShaderModule frag_shader = jms::vulkan::shader::Load("shaders/shader.frag.spv", device);
-    vk::raii::ShaderModule vert_shader = jms::vulkan::shader::Load("shaders/shader.vert.spv", device);
-    std::vector<vk::PipelineShaderStageCreateInfo> shader_stages{
-        {
-            .stage=vk::ShaderStageFlagBits::eVertex,
-            .module=*vert_shader,
-            .pName="main"
-        },
-        {
-            .stage=vk::ShaderStageFlagBits::eFragment,
-            .module=*frag_shader,
-            .pName="main"
-        }
-    };
+                         const std::vector<vk::DescriptorSetLayoutBinding>& layout_bindings,
+                         const std::vector<jms::vulkan::shader::Info>& shaders) {
+    std::vector<vk::PipelineShaderStageCreateInfo> shader_stages{};
+    std::ranges::transform(shaders, std::back_inserter(shader_stages), [](const jms::vulkan::shader::Info& info) {
+        return info.ToCreateInfo();
+    });
 
     vk::PipelineInputAssemblyStateCreateInfo input_assembly_info{
         .topology=vk::PrimitiveTopology::eTriangleList,
@@ -237,19 +233,19 @@ void State::InitPipeline(const vk::raii::Device& device,
 
     // *********************************************************
     // Default viewport and scissor; stored in state for use when drawing with dynamic viewport/scissor
-    viewport = vk::Viewport{
+    viewports.push_back(vk::Viewport{
         .x=0.0f,
         .y=0.0f,
         .width=static_cast<float>(target_extent.width),
         .height=static_cast<float>(target_extent.height),
         .minDepth=0.0f,
         .maxDepth=1.0f
-    };
+    });
 
-    scissor = vk::Rect2D{
+    scissors.push_back(vk::Rect2D{
         .offset={0, 0},
         .extent=target_extent
-    };
+    });
     // *********************************************************
 
     vk::PipelineViewportStateCreateInfo viewport_info{
@@ -309,14 +305,13 @@ void State::InitPipeline(const vk::raii::Device& device,
         return *dsl;
     });
 
+    auto vertex_info = vertex_desc.GetInfo();
     pipeline_layouts.push_back(device.createPipelineLayout({
         .setLayoutCount=static_cast<uint32_t>(vk_descriptor_set_layouts.size()),
         .pSetLayouts=vk_descriptor_set_layouts.data(),
         .pushConstantRangeCount=0,
         .pPushConstantRanges=nullptr
     }));
-
-    auto vertex_info = vertex_desc.GetInfo();
     vk::PipelineLayout vk_pipeline_layout = *pipeline_layouts.back();
     vk::RenderPass vk_render_pass = *render_pass;
     uint32_t subpass_id = 0;

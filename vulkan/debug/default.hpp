@@ -3,8 +3,7 @@
 
 #include <functional>
 
-#include "include_config.hpp"
-#include <vulkan/vulkan_raii.hpp>
+#include "jms/vulkan/vulkan.hpp"
 //#include <vulkan/vk_enum_string_helper.h>
 
 

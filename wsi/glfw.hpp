@@ -7,6 +7,7 @@
 #include <tuple>
 #include <vector>
 
+#include "jms/vulkan/vulkan.hpp"
 #include <GLFW/glfw3.h>
 
 
@@ -34,6 +35,7 @@ struct Environment {
 
     void EnableHIDPI();
 };
+
 
 struct Window {
     std::unique_ptr<GLFWwindow, decltype(&glfwDestroyWindow)> window{nullptr, &glfwDestroyWindow};

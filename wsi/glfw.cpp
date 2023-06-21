@@ -1,13 +1,10 @@
+#include "glfw.hpp"
+
 #include <stdexcept>
 #include <string>
 #include <vector>
 
 #include <fmt/core.h>
-// correct platform specific preprocessor definition defined in Makefile
-#include "jms/vulkan/include_config.hpp"
-#include <vulkan/vulkan_raii.hpp>
-
-#include "glfw.hpp"
 
 
 namespace jms {
@@ -26,6 +23,7 @@ void Environment::EnableHIDPI() {
     }
 #endif
 }
+
 
 std::vector<std::string> GetVulkanInstanceExtensions() {
     uint32_t count = 0;

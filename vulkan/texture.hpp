@@ -6,11 +6,9 @@
 #include <memory>
 #include <stdexcept>
 
-#include "include_config.hpp"
-#include <vulkan/vulkan_raii.hpp>
-
-#include "commands.hpp"
-#include "memory.hpp"
+#include "jms/vulkan/vulkan.hpp"
+#include "jms/vulkan/commands.hpp"
+#include "jms/vulkan/memory.hpp"
 
 
 namespace jms {

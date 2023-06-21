@@ -5,9 +5,7 @@
 #include <exception>
 #include <limits>
 
-#include "include_config.hpp"
-#include <vulkan/vulkan_raii.hpp>
-#undef max
+#include "jms/vulkan/vulkan.hpp"
 
 
 namespace jms {
