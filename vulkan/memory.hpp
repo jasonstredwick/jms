@@ -372,5 +372,251 @@ struct HostStorageBuffer : StorageBuffer<T> {
 };
 
 
+
+#include <array>
+#include <cstddef>
+#include <list>
+#include <stdexcept>
+#include <vector>
+/***
+ * Vulkan storage buffer allocator.
+ *
+ * 32KB  = 32768  <- 2^15
+ * 64KB  = 65536  <- 2^16
+ * 128KB = 131072 <- 2^17
+ * 256KB = 262144 <- 2^18
+ *
+ * 256MB = 268435456 <- 2^28
+ *
+ * 1GB   = 1073741824  <- 2^30
+ * 32GB  = 34359738368 <- 32 * 2^30 <- 2^35
+ * 64GB  = 68719476736 <- 64 * 2^30 <- 2^36
+ *
+ * Allocation strategies-
+ *   1. allocate next chunk when percentage filled exceeded: 50%, 75%, 100%
+ *   2. allocate next chunk with size-
+ *       a. relative to current chunk size: 100%, 200%
+ *       b. fixed chunk size
+ *
+ * Storage provides allocations for a specific device.  Storage cannot change what device it is associated with.
+ * Alternate strategies and migrations would be required to copy/move data from one Storage to another.  This
+ * structure is not intended for multi-device support and device intermixing.
+ *
+ * *NOTE: Should be monitoring the maxMemoryAllocationCount feature.  How to ensure that allocations happen elsewhere?
+ * *NOTE: Should be checking against the feature maxMemoryAllocationSize
+ * *NOTE: there is a chance that allocation is larger than requested due to alignment manipulation behind the
+ *        scenes.  I am not certain how to check or get that value.
+ *
+ *
+ * storage_blocks = StorageBlocks{.device=device, .memory_type_index=memory_type_index, .chunk_size=65536};
+ * SSBO<Vertex> ssbo_vertices{storage_blocks};
+ * std::vector<Vertex> vertices{};
+ * ssbo_vertices.copy(vertices);
+ * ssbo_vertices.update(vertices, dirty_ranges); // what happens if includes ranges beyond last copy
+ *
+ * ssbo_vertices.bind(); // lets say it contains 2 64KB non-contiguous pages.  How to bind for shader?
+ * struct Page {
+ * };
+ *
+ *
+ *
+ * Types of buffers-
+ * 1. Class instance - uniform buffer allocated from block for instance allocations
+ * 2. Class instance array - same as above but as array; must verify size?  Or bump to storage buffer?
+ * 3. Large buffers of the same type
+ *     a. fixed size array
+ * Dynamic allocations need to designate growth methods:
+ * a. how much to grow
+ * b. how to grow; i.e. extend with new block or allocate new chunk, copy data, and deallocate old memory
+ * c. should growth allocate the entire (aligned) requested bytes?  Or should allocate entire growth split across
+ *    chunks?
+ * What should happen when starting with small amounts of data?  Then what should happen when it grows to a threshold?
+ * At threshold should it migrate small allocations into unit chunk?  Then allocate all future with chunks? How can
+ * one write a strategy that allows this flexibility?  Concern is overallocating for early data that either leads
+ * to lots of waste when lots of types but smaller quanity. (maybe this doesn't matter and should be using GPU for
+ * this small quantities?)  The other issue would be small allocations alternating within a chunk before it gets to
+ * a good chunk size.  Should it then consolidate the small ones and then grow by chunk?  Or start out with the
+ * proper good chunk size first?  How to easily allow this flexibility?
+ *
+ * When using sparse buffers to store data across chunks, do I need to worry about element proximity and caching?  If
+ * sparse buffers are no performant could one use multiple render passes to render each chunk?  Again, is there a
+ * potential issue with element locality and caching?
+ *
+ * Need to have multiple pipelines for different primitives.  How to reuse sparse data?
+ */
+struct StorageBlocks {
+    static_assert(sizeof(uint64_t) <= sizeof(VkDeviceSize),
+                  "StorageBlocks requires VkDeviceSize is at least the size of uint64_t.");
+
+    static const int64_t ERROR_INVALID_CHUNK_SIZE = -1;             // power of 2; greater than 512
+    static const int64_t ERROR_INVALID_MAX_CHUNK_SIZE = -2;         // power of 2; greater than 512
+    static const int64_t ERROR_INVALID_REQUESTED_CHUNK_SIZE = -3;   // power of 2; greater than 512
+    static const int64_t ERROR_TOO_MANY_OBJECTS = -4;               // VK_ERROR_TOO_MANY_OBJECTS
+    static const int64_t ERROR_OUT_OF_MEMORY = -5;                  // VK_ERROR_OUT_OF_DEVICE_MEMORY
+    static const int64_t ERROR_INVALID_EXTERNAL_HANDLE = -6;        // VK_ERROR_INVALID_EXTERNAL_HANDLE
+    static const int64_t ERROR_INVALID_OPAQUE_CAPTURE_ADDRESS = -7; // VK_ERROR_INVALID_OPAQUE_CAPTURE_ADDRESS_KHR
+    static const int64_t ERROR_UNKNOWN_VULKAN_ERROR = -8;           // unknown/unexpected Vulkan error
+    static const int64_t ERROR_REQUEST_EXCEEDS_MAX = -9;            // requested memory too large
+
+    VkDevice_T* const device;
+    VkAllocationCallbacks vk_allocation_callbacks{};
+    alignas(sizeof(int64_t)) const uint32_t memory_type_index;
+    int64_t chunk_size = 32768;
+    int64_t max_chunk_size = 268435456;
+    std::vector<VkDeviceMemory_T*> blocks{};
+
+    StorageBlocks() = default;
+    StorageBlocks(const StorageBlocks&) = delete;
+    StorageBlocks(StorageBlocks&&) = default;
+    ~StorageBlocks() { Clear(); }
+    StorageBlocks& operator=(const StorageBlocks&) = delete;
+    StorageBlocks& operator=(StorageBlocks&&) = default;
+
+    [[nodiscard]] void* allocate(size_t bytes, size_t alignment=alignof(std::max_align_t));
+    void deallocate(void* p, size_t bytes, size_t alignment=alignof(std::max_align_t));
+    struct memory_resource{}; // define temporarily for is_equal
+    bool is_equal(const memory_resource& other) const noexcept;
+
+    bool do_is_equal();
+
+    /**
+     * Must take into account-
+     * 1. protected bit set for memory type and whether or not protected memory feature is enabled
+     * 2. Do I need to care about MemoryOpaqueCapture?
+     * 3. Do I need to care about AllocateDeviceAddress?
+     * 4. VkDedicatedAllocationMemoryAllocateInfoNV
+     * 5. VkMemoryAllocateFlagsInfo,
+     * 6. VkMemoryDedicatedAllocateInfo,
+     * 7. VkMemoryPriorityAllocateInfoEXT
+    */
+    int64_t BlockAllocate(int64_t size_in_bytes) {
+        if ((max_chunk_size < 512) || (max_chunk_size & (max_chunk_size - 1) != 0)) {
+            return ERROR_INVALID_MAX_CHUNK_SIZE;
+        }
+        if ((size_in_bytes < 512) || (size_in_bytes & (size_in_bytes - 1) != 0) || (size_in_bytes > max_chunk_size)) {
+            return ERROR_INVALID_MAX_CHUNK_SIZE;
+        }
+        VkDeviceMemory_T* mem = nullptr;
+        VkMemoryAllocateInfo info{
+            .sType=VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+            .pNext=nullptr,
+            // non-negative values are castable to uint64_t unmodified
+            .allocationSize=static_cast<VkDeviceSize>(size_in_bytes),
+            .memoryTypeIndex=memory_type_index
+        };
+        VkResult result = vkAllocateMemory(device, &info, &vk_allocation_callbacks, &mem);
+        switch (result) {
+        case VK_SUCCESS:
+            break;
+        case VK_ERROR_TOO_MANY_OBJECTS:
+            // exceeded maxMemoryAllocationCount (can be very small for some types such as protected resources)
+            return ERROR_TOO_MANY_OBJECTS;
+        case VK_ERROR_OUT_OF_DEVICE_MEMORY:
+            // This can also occur if the requested size is larger than maxMemoryAllocationSize
+            return ERROR_OUT_OF_MEMORY;
+        case VK_ERROR_INVALID_EXTERNAL_HANDLE:
+            return ERROR_INVALID_EXTERNAL_HANDLE;
+        case VK_ERROR_INVALID_OPAQUE_CAPTURE_ADDRESS_KHR:
+            return ERROR_INVALID_OPAQUE_CAPTURE_ADDRESS;
+        default:
+            return ERROR_UNKNOWN_VULKAN_ERROR;
+        }
+        blocks.push_back(mem);
+        return size_in_bytes;
+    }
+    void BlockFree(VkDeviceMemory_T* ptr) {
+        vkFreeMemory(device, ptr, &vk_allocation_callbacks);
+    }
+
+    void Clear() {
+        for (VkDeviceMemory_T* ptr : blocks) {
+            BlockFree(ptr);
+        }
+        blocks.clear();
+    }
+};
+
+
+/*
+Sparse block size- VkMemoryRequirements::alignment
+
+Storage is owner of all allocation/data
+Allocator represents a sequence of allocations managed together.  Storage can provide many allocators.
+
+Fixed allocators can allocate a single instance or array of instances.  It can also allow multiple instances and/or
+arrays to be within the same units of backing memory.  What is allocated from this allocator is considered to fixed
+size and non-changing over time.
+
+DynamicAllocators can allocate units of backing memory over time allowing for containers with dynamic sizing. 
+*/
+#include <algorithm>
+#include <cstdlib>
+#include <mutex>
+#include <utility>
+struct Page {
+    VkDeviceMemory_T* raw_byes = nullptr;
+    const int64_t num_bytes = 0;
+    int64_t free_index = 0;
+    int64_t remaining = 0;
+};
+struct PageReference { int64_t page_id=-1, index=-1; };
+
+
+struct ContiguousAllocator {
+    const int64_t unit_alignment;
+    const int64_t page_size;
+    std::vector<VkDeviceMemory_T*> memory{};
+    std::vector<int64_t> free_index{};
+    std::vector<int64_t> remaining{};
+    std::mutex mutex{};
+
+    PageReference Allocate(const int64_t num_bytes) {
+        // Precompute information
+        int64_t actual_bytes = num_bytes + static_cast<int64_t>(num_bytes % unit_alignment > 0) * unit_alignment;
+        int64_t num_page_blocks = num_bytes / page_size + static_cast<int64_t>(num_bytes % page_size > 0);
+        //auto [num_page_blocks, extra_page_bytes] = std::div(num_bytes, page_size);
+
+        PageReference pr = AllocFirstContiguous(actual_bytes);
+        if (pr.page_id >= 0) { return pr; }
+        return AllocNew(actual_bytes);
+    };
+    void deallocate() {};
+
+    PageReference AllocFirstContiguous(int64_t N) {
+        std::lock_guard<std::mutex> lock{mutex};
+        auto it = std::ranges::find_if(remaining, [N](auto x) { return x >= N; });
+        if (it == remaining.end()) { return {}; }
+        size_t page_id = static_cast<size_t>(it - remaining.begin());
+        int64_t mem_index = free_index[page_id];
+        *it -= N;
+        free_index[page_id] += N;
+        return {.page_id=static_cast<int64_t>(page_id), .index=mem_index};
+    }
+
+    PageReference AllocNew(int64_t N) {
+        return {};
+    }
+};
+struct SparseAllocator{};
+template <typename T, typename Allocator>
+struct Instance{
+    Allocator* allocator{nullptr};
+    int64_t id{-1};
+    Instance(FixedAllocator& allocator_) : allocator{&allocator_}, id(allocator_.allocate(sizeof(T))) {};
+    Instance(const Instance&) = delete;
+    ~Instance() { allocator->deallocate(id); }
+    Instance& operator=(const Instance&) = delete;
+    void Set(const T& value);
+};
+struct Array{};
+struct ArraySparse{};
+struct VectorSparse{};
+
+struct Vertex{};
+StorageBlocks storage_blocks{};
+FixedAllocator fixed_allocator{};
+Instance<Vertex> instance{fixed_allocator};
+
+
 }
 }
