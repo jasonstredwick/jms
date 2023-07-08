@@ -3,6 +3,30 @@
 
 #include <cstdint>
 #include <ranges>
+#include <vector>
+
+
+
+#include <array>
+#include <cstddef>
+#include <list>
+#include <stdexcept>
+
+
+#include <algorithm>
+#include <cstdlib>
+#include <mutex>
+#include <utility>
+
+
+#include <bit>
+#include <iterator>
+#include <limits>
+#include <span>
+#include <string_view>
+#include <tuple>
+
+
 
 #include "jms/vulkan/vulkan.hpp"
 
@@ -126,14 +150,6 @@ void ToOptimal() {
 }
 
 
-#include <algorithm>
-#include <array>
-#include <iterator>
-#include <limits>
-#include <span>
-#include <string_view>
-#include <tuple>
-#include <vector>
 struct BudgetInfo {
     vk::DeviceSize budget;
     vk::DeviceSize usage;
@@ -373,11 +389,6 @@ struct HostStorageBuffer : StorageBuffer<T> {
 
 
 
-#include <array>
-#include <cstddef>
-#include <list>
-#include <stdexcept>
-#include <vector>
 /***
  * Vulkan storage buffer allocator.
  *
@@ -461,6 +472,7 @@ struct StorageBlocks {
     VkDevice_T* const device;
     VkAllocationCallbacks vk_allocation_callbacks{};
     alignas(sizeof(int64_t)) const uint32_t memory_type_index;
+
     int64_t chunk_size = 32768;
     int64_t max_chunk_size = 268435456;
     std::vector<VkDeviceMemory_T*> blocks{};
@@ -549,10 +561,6 @@ size and non-changing over time.
 
 DynamicAllocators can allocate units of backing memory over time allowing for containers with dynamic sizing. 
 */
-#include <algorithm>
-#include <cstdlib>
-#include <mutex>
-#include <utility>
 struct Page {
     VkDeviceMemory_T* raw_byes = nullptr;
     const int64_t num_bytes = 0;
@@ -565,17 +573,14 @@ struct PageReference { int64_t page_id=-1, index=-1; };
 struct ContiguousAllocator {
     const int64_t unit_alignment;
     const int64_t page_size;
+    StorageBlocks& storage_blocks;
     std::vector<VkDeviceMemory_T*> memory{};
     std::vector<int64_t> free_index{};
     std::vector<int64_t> remaining{};
     std::mutex mutex{};
 
     PageReference Allocate(const int64_t num_bytes) {
-        // Precompute information
         int64_t actual_bytes = num_bytes + static_cast<int64_t>(num_bytes % unit_alignment > 0) * unit_alignment;
-        int64_t num_page_blocks = num_bytes / page_size + static_cast<int64_t>(num_bytes % page_size > 0);
-        //auto [num_page_blocks, extra_page_bytes] = std::div(num_bytes, page_size);
-
         PageReference pr = AllocFirstContiguous(actual_bytes);
         if (pr.page_id >= 0) { return pr; }
         return AllocNew(actual_bytes);
@@ -594,10 +599,29 @@ struct ContiguousAllocator {
     }
 
     PageReference AllocNew(int64_t N) {
+        int64_t num_page_blocks = N / page_size + static_cast<int64_t>(N % page_size > 0);
+        int64_t total_block_bytes = num_page_blocks * page_size;
+        VkDeviceMemory_T* mem = storage_blocks.BlockAllocate(total_blocks_bytes);
+        if (!mem) { return {}; }
+        std::lock_guard<std::mutex> lock{mutex};
+        memory.push_back(mem);
+        free_index.push_back(N);
+        remaining.push_back(total_block_bytes - N);
+        return {.page_id=static_cast<int64_t>(memory.size() - 1), .index=0};
+    }
+};
+struct SparseAllocator{
+    PageReference AllocNew(int64_t N) {
+        auto [num_page_blocks, extra_page_bytes] = std::div(N, page_size);
+        auto num_pages = num_page_blocks + static_cast<int64_t>(extra_page_bytes > 0);
+        std::vector<VkDeviceMemory_T*> local_alloc{};
+        local_alloc.reserve(static_cast<size_t>(num_pages));
+        for (auto _ : std::views::iota(0, num_pages)) {
+            local_alloc.push_back(storage_blocks.BlockAllocate());
+        }
         return {};
     }
 };
-struct SparseAllocator{};
 template <typename T, typename Allocator>
 struct Instance{
     Allocator* allocator{nullptr};
@@ -618,5 +642,34 @@ FixedAllocator fixed_allocator{};
 Instance<Vertex> instance{fixed_allocator};
 
 
+/*
+Hierarchical allocators.  StorageBlock -> Allocator then new Allocators can be created using other backing allocators.  The lowest level
+allocators allocate actual memory.  Higher tier allocators get blocks of data from the lower tier allocator and allocate within that.
+Do you have to do anything special due to the layering?
+*/
+
+
+
+
 }
 }
+
+
+
+
+#include <bit>
+#include <cstddef>
+#include <memory_resource>
+
+
+class DeviceMemoryResource : std::pmr::memory_resource {
+};
+class HostMemoryResource : std::pmr::memory_resource {
+};
+
+
+struct Allocator {
+    [[nodiscard]] void* allocate(std::size_t bytes, std::size_t alignment=alignof(std::max_align_t));
+    void deallocate(void* src);
+};
+class Memory {};
