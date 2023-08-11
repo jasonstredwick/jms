@@ -2,7 +2,8 @@
 
 
 #include <algorithm>
-#include <memory> // std::addressof
+#include <concepts>
+#include <memory>
 #include <span>
 #include <stdexcept>
 #include <vector>
@@ -14,18 +15,43 @@
 template <typename T>
 struct Allocation {
     using pointer_type = T*;
+
     pointer_type const ptr{nullptr};
     const size_t offset{0};
-    const size_t num_units{0};
+    const size_t size{0};
 };
 using MemoryAllocation = Allocation<VkDeviceMemory_T>;
 
 
+#if 0
+template <template <bool Owner> typename T, bool Owner>
+concept AllocationResult_c = requires(T<Owner> t) {
+    requires std::same_as<T<true>, vk::raii::DeviceMemory> || std::same_as<T<false>, vk::raii::DeviceMemory*>;
+    { *t } -> std::same_as<vk::raii::DeviceMemory&>;
+    { t.Bytes() } -> std::convertible_to<size_t>;
+    { t.Offset() } -> std::convertible_to<size_t>;
+    { t.FinalBytes() } -> std::convertible_to<size_t>;
+    { t.FinalAlignment() } -> std::convertible_to<size_t>;
+    requires std::is_constructible_v<T<Owner>, vk::raii::DeviceMemory&&, size_t, size_t, size_t, size_t>;
+    requires !std::is_copy_constructible_v<T<Owner>> && !std::is_copy_assignable_v<T<Owner>>;
+    requires std::is_move_constructible_v<T<Owner>> && std::is_move_assignable_v<T<Owner>>;
+};
+#endif
+
+
 struct MemoryResource {
     virtual ~MemoryResource() noexcept = default;
-    [[nodiscard]] virtual MemoryAllocation Allocate(size_t num_units) = 0;
+    [[nodiscard]] virtual MemoryAllocation Allocate(size_t size) = 0;
     virtual void Deallocate(MemoryAllocation allocation) = 0;
     virtual bool IsEqual(const MemoryResource& other) const noexcept { return std::addressof(other) == this; }
+};
+
+
+template <typename T>
+concept MemoryResource_c = requires (T t) {
+    { t.Allocate() } -> std::same_as<MemoryAllocation>;
+    { t.Deallocate() };
+    { t.IsEqual() } -> std::convertible_to<bool>;
 };
 
 
@@ -33,50 +59,50 @@ struct MemoryResource {
 // TOOD (2): use pmr with possibly pool allocations to manage STL container internal heap allocations.
 template <Mutex_c Mutex_t=NoMutex>
 class AdhocPoolMemoryResource : public MemoryResource {
-    struct Space { size_t offset, num_units; };
+    struct Space { size_t offset, size; };
 
     struct Chunk {
         VkDeviceMemory_T* ptr;
-        size_t num_units;
+        size_t size;
         std::vector<Space> free_space{};
     };
 
     MemoryResource* upstream;
-    size_t chunk_num_units;
+    size_t chunk_size;
     std::vector<Chunk> chunks{};
     Mutex_t mutex{};
 
 public:
-    AdhocPoolMemoryResource(MemoryResource& upstream, size_t chunk_num_units)
-    : upstream{std::addressof(upstream)}, chunk_num_units{chunk_num_units}
+    AdhocPoolMemoryResource(MemoryResource& upstream, size_t chunk_size)
+    : upstream{std::addressof(upstream)}, chunk_size{chunk_size}
     {
-        if (!chunk_num_units) { throw std::runtime_error{"Chunk num_units must be non-zero."}; }
+        if (!chunk_size) { throw std::runtime_error{"Chunk size must be non-zero."}; }
     }
     AdhocPoolMemoryResource(const AdhocPoolMemoryResource&) = delete;
     AdhocPoolMemoryResource& operator=(const AdhocPoolMemoryResource&) = delete;
     ~AdhocPoolMemoryResource() noexcept override { Clear(); }
 
-    [[nodiscard]] MemoryAllocation Allocate(size_t num_units) override {
-        if (!num_units) { throw std::bad_alloc{}; }
+    [[nodiscard]] MemoryAllocation Allocate(size_t size) override {
+        if (!size) { throw std::bad_alloc{}; }
         std::lock_guard<Mutex_t>{mutex};
         for (Chunk& chunk : chunks) {
-            auto IsEnough = [needed=num_units](size_t available) -> bool { return available >= needed; };
-            if (auto it = std::ranges::find_if(chunk.free_space, IsEnough, &Space::num_units); it != chunk.free_space.end()) {
+            auto IsEnough = [needed=size](size_t available) -> bool { return available >= needed; };
+            if (auto it = std::ranges::find_if(chunk.free_space, IsEnough, &Space::size); it != chunk.free_space.end()) {
                 Space& space = *it;
-                size_t offset = std::exchange(space.offset, space.offset + num_units);
-                if (space.num_units == num_units) { chunk.free_space.erase(it); }
-                else { space.num_units -= num_units; }
-                return {.ptr=chunk.ptr, .offset=offset, .num_units=num_units};
+                size_t offset = std::exchange(space.offset, space.offset + size);
+                if (space.size == size) { chunk.free_space.erase(it); }
+                else { space.size -= size; }
+                return {.ptr=chunk.ptr, .offset=offset, .size=size};
             }
         }
-        size_t total_units = ((num_units / chunk_num_units) + static_cast<size_t>(num_units % chunk_num_units > 0)) * chunk_num_units;
+        size_t total_units = ((size / chunk_size) + static_cast<size_t>(size % chunk_size > 0)) * chunk_size;
         MemoryAllocation result = upstream->Allocate(total_units);
         chunks.push_back({
             .ptr=result.ptr,
-            .num_units=total_units,
-            .free_space={{.offset=num_units, .num_units=(total_units - num_units)}}
+            .size=total_units,
+            .free_space={{.offset=size, .size=(total_units - size)}}
         });
-        return {.ptr=result.ptr, .offset=0, .num_units=num_units};
+        return {.ptr=result.ptr, .offset=0, .size=size};
     }
 
     void Deallocate(MemoryAllocation allocation) override {
@@ -87,37 +113,37 @@ public:
         Chunk& chunk = *chunk_it;
 
         size_t offset = allocation.offset;
-        size_t num_units = allocation.num_units;
+        size_t size = allocation.size;
         auto IsFirstLess = [lhs=offset](size_t rhs) { return lhs < rhs; };
         auto right_it = std::ranges::find_if(chunk.free_space, IsFirstLess, &Space::offset);
         if (chunk.free_space.empty()) {
-            chunk.free_space.push_back({.offset=offset, .num_units=num_units});
+            chunk.free_space.push_back({.offset=offset, .size=size});
         } else if (right_it == chunk.free_space.begin()) {
             Space& right = *right_it;
-            if (right.offset < offset + num_units) { throw std::runtime_error{"Found overlapping suballocation."}; }
-            else if (right.offset == offset + num_units) { right.offset = offset; }
-            else { chunk.free_space.insert(right_it, {.offset=offset, .num_units=num_units}); }
+            if (right.offset < offset + size) { throw std::runtime_error{"Found overlapping suballocation."}; }
+            else if (right.offset == offset + size) { right.offset = offset; }
+            else { chunk.free_space.insert(right_it, {.offset=offset, .size=size}); }
         } else if (right_it == chunk.free_space.end()) {
             Space& left = *std::prev(right_it);
-            if (offset < left.offset + left.num_units) { throw std::runtime_error{"Found overlapping suballocation."}; }
-            else if (offset == left.offset + left.num_units) { left.num_units += num_units; }
-            else { chunk.free_space.push_back({.offset=offset, .num_units=num_units}); }
+            if (offset < left.offset + left.size) { throw std::runtime_error{"Found overlapping suballocation."}; }
+            else if (offset == left.offset + left.size) { left.size += size; }
+            else { chunk.free_space.push_back({.offset=offset, .size=size}); }
         } else {
             Space& left = *std::prev(right_it);
             Space& right = *right_it;
-            if (offset < left.offset + left.num_units || right.offset < offset + num_units) {
+            if (offset < left.offset + left.size || right.offset < offset + size) {
                 throw std::runtime_error{"Found overlapping suballocation."};
             }
-            if (offset == left.offset + left.num_units) {
-                left.num_units += num_units;
-                if (right.offset == offset + num_units) {
-                    left.num_units += right.num_units;
+            if (offset == left.offset + left.size) {
+                left.size += size;
+                if (right.offset == offset + size) {
+                    left.size += right.size;
                     chunk.free_space.erase(right_it);
                 }
-            } else if (right.offset == offset + num_units) {
+            } else if (right.offset == offset + size) {
                 right.offset = offset;
             } else {
-                chunk.free_space.push_back({.offset=offset, .num_units=num_units});
+                chunk.free_space.push_back({.offset=offset, .size=size});
             }
         }
     }
@@ -125,7 +151,7 @@ public:
     void Clear() {
         std::lock_guard<Mutex_t>{mutex};
         std::ranges::for_each(chunks, [upstream](Chunk& chunk) {
-            upstream->Deallocate({.ptr=chunk.ptr, .offset=0, .num_units=chunk.num_units});
+            upstream->Deallocate({.ptr=chunk.ptr, .offset=0, .size=chunk.size});
         });
         chunks.clear();
     }
@@ -140,39 +166,39 @@ class BlockPoolMemoryResource : public MemoryResource {
     };
 
     MemoryResource* upstream;
-    size_t block_num_units;
-    size_t chunk_num_units;
+    size_t block_size;
+    size_t chunk_size;
     std::vector<VkDeviceMemory_T*> chunks{};
     std::vector<Block> blocks{};
     decltype(blocks)::iterator free_block_it{blocks.end()};
     Mutex_t mutex{};
 
 public:
-    BlockPoolMemoryResource(MemoryResource& upstream, size_t block_num_units, size_t chunk_num_units)
-    : upstream{std::addressof(upstream)}, block_num_units{block_num_units}, chunk_num_units{chunk_num_units}
+    BlockPoolMemoryResource(MemoryResource& upstream, size_t block_size, size_t chunk_size)
+    : upstream{std::addressof(upstream)}, block_size{block_size}, chunk_size{chunk_size}
     {
-        if (!chunk_num_units || !block_num_units) { throw std::runtime_error{"Num chunk units and block units must be non-zero."}; }
-        if (chunk_num_units % block_num_units > 0) { throw std::runtime_error{"Num Block units must be multiple of num chunk units."}; }
+        if (!chunk_size || !block_size) { throw std::runtime_error{"Num chunk units and block units must be non-zero."}; }
+        if (chunk_size % block_size > 0) { throw std::runtime_error{"Num Block units must be multiple of num chunk units."}; }
     }
     BlockPoolMemoryResource(const BlockPoolMemoryResource&) = delete;
     BlockPoolMemoryResource& operator=(const BlockPoolMemoryResource&) = delete;
     ~BlockPoolMemoryResource() noexcept override { Clear(); }
 
-    [[nodiscard]] MemoryAllocation Allocate([[maybe_unused]] size_t num_units) override {
+    [[nodiscard]] MemoryAllocation Allocate([[maybe_unused]] size_t size) override {
         std::lock_guard<Mutex_t>{mutex};
         if (free_block_it == blocks.end()) {
-            MemoryAllocation result = upstream->Allocate(chunk_num_units);
+            MemoryAllocation result = upstream->Allocate(chunk_size);
             chunks.push_back(result.ptr);
-            size_t num_blocks = chunk_num_units / block_num_units;
+            size_t num_blocks = chunk_size / block_size;
             blocks.reserve(blocks.capacity() + num_blocks);
             for (size_t block=0; block<num_blocks; ++block) {
-                blocks.push_back({.ptr=result.ptr, .offset=(block * block_num_units)});
+                blocks.push_back({.ptr=result.ptr, .offset=(block * block_size)});
             }
             free_block_it = blocks.end() - num_blocks;
         }
         Block& block = *free_block_it;
         free_block_it = std::next(free_block_it);
-        return {.ptr=block.ptr, .offset=block.offset, .num_units=block_num_units};
+        return {.ptr=block.ptr, .offset=block.offset, .size=block_size};
     }   
 
     void Deallocate(MemoryAllocation allocation) override {
@@ -189,8 +215,8 @@ public:
 
     void Clear() {
         std::lock_guard<Mutex_t>{mutex};
-        std::ranges::for_each(chunks, [upstream, chunk_num_units](auto ptr) {
-            upstream->Deallocate({.ptr=ptr, .offset=0, .num_units=chunk_num_units});
+        std::ranges::for_each(chunks, [upstream, chunk_size](auto ptr) {
+            upstream->Deallocate({.ptr=ptr, .offset=0, .size=chunk_size});
         });
         chunks.clear();
         blocks.clear();
@@ -220,13 +246,13 @@ public:
     vk::AllocationCallbacks& GetAllocationCallbacks() const noexcept { return *vk_allocation_callbacks; }
     uint32_t GetMemoryType() const noexcept { return memory_type_index; }
 
-    [[nodiscard]] MemoryAllocation Allocate(size_t num_units) override {
-        if (!num_units) { throw std::bad_alloc{}; }
+    [[nodiscard]] MemoryAllocation Allocate(size_t size) override {
+        if (!size) { throw std::bad_alloc{}; }
         vk::raii::DeviceMemory dev_mem = device->allocateMemory({
-            .allocationSize=static_cast<vk::DeviceSize>(num_units),
+            .allocationSize=static_cast<vk::DeviceSize>(size),
             .memoryTypeIndex=memory_type_index
         }, *vk_allocation_callbacks);
-        return {.ptr=static_cast<VkDeviceMemory>(dev_mem.release()), .offset=0, .num_units=num_units};
+        return {.ptr=static_cast<VkDeviceMemory>(dev_mem.release()), .offset=0, .size=size};
     }
 
     void Deallocate(MemoryAllocation allocation) override {
@@ -246,7 +272,7 @@ public:
 template <Mutex_c Mutex_t=NoMutex>
 class MonotonicMemoryResource : public MemoryResource {
     struct alignas(8) Options {
-        size_t start_num_units{65536};
+        size_t start_size{65536};
         double multiple{2.0};
         bool allocate_initial_chunk{false};
     };
@@ -255,7 +281,7 @@ class MonotonicMemoryResource : public MemoryResource {
 
     MemoryResource* upstream;
     Options options{};
-    size_t next_num_units{0};
+    size_t next_size{0};
     std::vector<Chunk> chunks{};
     decltype(chunks)::iterator chunk_it = chunks.end();
     Mutex_t mutex{};
@@ -265,7 +291,7 @@ public:
     MonotonicMemoryResource(MemoryResource& upstream, Options options)
     : upstream{std::addressof(upstream)}, options{options}
     {
-        if (!options.start_num_units) { throw std::runtime_error{"Monotonic memory resource must have non-zero starting units."}; }
+        if (!options.start_size) { throw std::runtime_error{"Monotonic memory resource must have non-zero starting units."}; }
         if (options.multiple < 0) { throw std::runtime_error{"Monotonic memory resource must have a positive multiple."}; }
         if (options.allocate_initial_chunk) { AllocateNextChunk(0); chunk_it = chunks.begin(); }
     }
@@ -273,13 +299,13 @@ public:
     MonotonicMemoryResource& operator=(const MonotonicMemoryResource&) = delete;
     ~MonotonicMemoryResource() noexcept override { Clear(); }
 
-    [[nodiscard]] MemoryAllocation Allocate(size_t num_units) override {
-        if (!num_units) { throw std::bad_alloc{}; }
+    [[nodiscard]] MemoryAllocation Allocate(size_t size) override {
+        if (!size) { throw std::bad_alloc{}; }
         std::lock_guard<Mutex_t>{mutex};
-        while (chunk_it != chunks.end() && chunk_it->offset + num_units >= chunk_it->chunk_size) { chunk_it = std::next(chunk_it); }
-        if (chunk_it == chunks.end()) { AllocateNextChunk(num_units); chunk_it = std::prev(chunks.end()); }
-        size_t offset = std::exchange(chunk_it->offset, chunk_it->offset + num_units);
-        return {.ptr=chunk_it->ptr, .offset=offset, .num_units=num_units};
+        while (chunk_it != chunks.end() && chunk_it->offset + size >= chunk_it->chunk_size) { chunk_it = std::next(chunk_it); }
+        if (chunk_it == chunks.end()) { AllocateNextChunk(size); chunk_it = std::prev(chunks.end()); }
+        size_t offset = std::exchange(chunk_it->offset, chunk_it->offset + size);
+        return {.ptr=chunk_it->ptr, .offset=offset, .size=size};
     }
 
     void Deallocate([[maybe_unused]] MemoryAllocation allocation) override {}
@@ -287,26 +313,26 @@ public:
     void Clear() {
         std::lock_guard<Mutex_t>{mutex};
         for (Chunk& chunk : chunks) {
-            upstream->Deallocate({.ptr=chunk.ptr, .num_units=chunk.chunk_size, .offset=0});
+            upstream->Deallocate({.ptr=chunk.ptr, .size=chunk.chunk_size, .offset=0});
         }
         chunks.clear();
-        next_num_units = 0;
+        next_size = 0;
         chunk_it = chunks.end();
     }
 
 private:
-    void AllocateNextChunk(size_t num_units) {
-        if (!next_num_units) { next_num_units = options.start_num_units; }
+    void AllocateNextChunk(size_t size) {
+        if (!next_size) { next_size = options.start_size; }
         else {
-            double new_units = options.multiple * next_num_units;
+            double new_units = options.multiple * next_size;
             if (new_units < 1) { throw std::bad_alloc{}; }
-            next_num_units = static_cast<size_t>(new_units);
+            next_size = static_cast<size_t>(new_units);
         }
-        size_t total_units = next_num_units;
-        if (num_units > total_units) {
-            total_units = ((num_units / total_units) + static_cast<size_t>(num_units % total_units)) * next_num_units;
+        size_t total_units = next_size;
+        if (size > total_units) {
+            total_units = ((size / total_units) + static_cast<size_t>(size % total_units)) * next_size;
         }
         MemoryAllocation allocation = upstream->Allocate(total_units);
-        chunks.push_back({.ptr=allocation.ptr, .chunk_size=allocation.num_units});
+        chunks.push_back({.ptr=allocation.ptr, .chunk_size=allocation.size});
     }
 };
