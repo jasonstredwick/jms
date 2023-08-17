@@ -16,9 +16,9 @@ template <typename T>
 struct Allocation {
     using pointer_type = T*;
 
-    pointer_type const ptr{nullptr};
-    const size_t offset{0};
-    const size_t size{0};
+    pointer_type ptr{nullptr};
+    size_t offset{0};
+    size_t size{0};
 };
 using MemoryAllocation = Allocation<VkDeviceMemory_T>;
 
@@ -149,8 +149,8 @@ public:
     }
 
     void Clear() {
-        std::lock_guard<Mutex_t>{mutex};
-        std::ranges::for_each(chunks, [upstream](Chunk& chunk) {
+        std::lock_guard<Mutex_t> lock{mutex};
+        std::ranges::for_each(chunks, [upstream=upstream](Chunk& chunk) {
             upstream->Deallocate({.ptr=chunk.ptr, .offset=0, .size=chunk.size});
         });
         chunks.clear();
@@ -215,7 +215,7 @@ public:
 
     void Clear() {
         std::lock_guard<Mutex_t>{mutex};
-        std::ranges::for_each(chunks, [upstream, chunk_size](auto ptr) {
+        std::ranges::for_each(chunks, [upstream=upstream, chunk_size=chunk_size](auto ptr) {
             upstream->Deallocate({.ptr=ptr, .offset=0, .size=chunk_size});
         });
         chunks.clear();

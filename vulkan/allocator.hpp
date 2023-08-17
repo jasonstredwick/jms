@@ -2,6 +2,7 @@
 
 
 #include <algorithm>
+#include <functional>
 #include <stdexcept>
 #include <vector>
 
@@ -90,7 +91,7 @@ public:
         buffers.erase(it);
     }
 
-    ImageAllocation AllocateImage() override {}
+    ImageAllocation AllocateImage() override { return {}; }
 
     void DeallocateImage(ImageAllocation allocation) override {
         auto it = std::ranges::find_if(images, [rhs=allocation.ptr](VkImage_T* lhs) { return lhs == rhs; }, &ImageData::ptr);
@@ -100,9 +101,9 @@ public:
     }
 
     void Clear() {
-        std::ranges::for_each(buffers, DestroyBuffer);
+        for (BufferData& data : buffers) { DestroyBuffer(data); }
         buffers.clear();
-        std::ranges::for_each(images, DestroyImage);
+        for (ImageData& data : images) { DestroyImage(data); }
         images.clear();
     }
 
