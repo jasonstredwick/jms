@@ -36,7 +36,7 @@ vk::StructureType ExtractSType(void* next_ptr) {
         if (auto* ptr = jms::vulkan::Convert<vk::PhysicalDeviceMemoryBudgetPropertiesEXT>(props2.pNext); ptr) {
             budget_props = ptr;
         } else {
-            throw std::runtime_error(fmt::format("Unknown PhysicalDeviceMemory extension: {}\n",
+            throw std::runtime_error(std::format("Unknown PhysicalDeviceMemory extension: {}\n",
                                                     vk::to_string(jms::vulkan::ExtractSType(props2.pNext))));
         }
     }

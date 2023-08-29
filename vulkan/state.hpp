@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <exception>
+#include <format>
 #include <iterator>
 #include <optional>
 #include <ranges>
@@ -10,8 +11,6 @@
 #include <string>
 #include <string_view>
 #include <vector>
-
-#include <fmt/core.h>
 
 #include "jms/vulkan/vulkan.hpp"
 #include "jms/vulkan/debug/default.hpp"
@@ -140,7 +139,7 @@ void State::InitInstance(InstanceConfig&& cfg) {
     if (instance_config.debug.has_value()) { requested_layer_names.insert(std::string{"VK_LAYER_KHRONOS_validation"}); }
     for (auto& i : requested_layer_names) {
         if (!layer_names.contains(i)) {
-            throw std::runtime_error(fmt::format("Requested layer \"{}\" not available.", i));
+            throw std::runtime_error(std::format("Requested layer \"{}\" not available.", i));
         }
     }
 
@@ -150,7 +149,7 @@ void State::InitInstance(InstanceConfig&& cfg) {
                             [](auto& i) -> std::string { return i.extensionName; });
     for (auto& i : instance_config.extension_names) {
         if (!extension_names.contains(i)) {
-            throw std::runtime_error(fmt::format("Requested instance extension \"{}\" not available.", i));
+            throw std::runtime_error(std::format("Requested instance extension \"{}\" not available.", i));
         }
     }
 

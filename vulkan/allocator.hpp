@@ -6,186 +6,193 @@
 #include <stdexcept>
 #include <vector>
 
-#include "jms/vulkan/memory_resource.hpp"
+#include "jms/memory/allocation.hpp"
+#include "jms/memory/resources.hpp"
+#include "jms/utils/no_mutex.hpp"
 #include "jms/vulkan/vulkan.hpp"
 
 
-using BufferAllocation = Allocation<VkBuffer_T>;
-using ImageAllocation = Allocation<VkImage_T>;
+namespace jms {
+namespace vulkan {
 
 
-struct Allocator {
-    virtual ~Allocator() noexcept {}
-    virtual BufferAllocation AllocateBuffer(size_t size,
-                                            vk::BufferCreateFlags create_flags,
-                                            vk::BufferUsageFlags usage_flags,
-                                            const std::vector<uint32_t>& sharing_queue_family_indices) = 0;
-    virtual void DeallocateBuffer(BufferAllocation allocation) = 0;
-    virtual ImageAllocation AllocateImage() = 0;
-    virtual void DeallocateImage(ImageAllocation allocation) = 0;
-    virtual bool IsEqual(const Allocator& other) const noexcept { return std::addressof(other) == this; }
-};
+using BufferAllocation = jms::memory::Allocation<VkBuffer_T, vk::DeviceSize>;
+using ImageAllocation = jms::memory::Allocation<VkImage_T, vk::DeviceSize>;
 
 
-template <typename T>
-concept AllocatorResource_c = requires (T t) {
-    { t.AllocateBuffer() } -> std::same_as<BufferAllocation>;
-    { t.DeallocateBuffer() };
-    { t.AllocateImage() } -> std::same_as<ImageAllocation>;
-    { t.DeallocateImage() };
-    { t.IsEqual() } -> std::convertible_to<bool>;
-};
+template <typename ResourceAllocation_t,
+          typename RAII_t,
+          typename MemoryAllocation_t,
+          template <typename> typename Container>
+class ResourceBase : jms::memory::Resource<ResourceAllocation_t> {
+protected:
+    using pointer_type = ResourceAllocation_t::pointer_type;
+    using size_type = ResourceAllocation_t::size_type;
 
+    struct Unit {
+        MemoryAllocation_t mem;
+        pointer_type res_ptr;
+    };
 
-class DirectAllocator : public Allocator {
-    struct BufferData { MemoryAllocation allocation; VkBuffer_T* ptr; };
-    struct ImageData { MemoryAllocation allocation; VkImage_T* ptr; };
-
-    MemoryResource* memory_resource;
+    Container<Unit> units{};
+    jms::memory::Resource<MemoryAllocation_t>* memory_resource;
     vk::raii::Device* device;
     vk::AllocationCallbacks* vk_allocation_callbacks;
-    size_t min_alignment;
-    std::vector<BufferData> buffers{};
-    std::vector<ImageData> images{};
 
-public:
-    DirectAllocator(MemoryResource& memory_resource,
-                    vk::raii::Device& device,
-                    vk::AllocationCallbacks& vk_allocation_callbacks,
-                    size_t min_alignment)
-    : memory_resource{std::addressof(memory_resource)},
-      device{std::addressof(device)},
-      vk_allocation_callbacks{std::addressof(vk_allocation_callbacks)},
-      min_alignment{min_alignment}
-    { if(!std::has_single_bit(min_alignment)) { throw std::runtime_error{"Allocator requires non-zero, power of two value."}; }}
+    void Clear() {
+        for (Unit& unit : units) { DestroyUnit(unit); }
+        units.clear();
+    }
 
-    DirectAllocator(const DirectAllocator&) = delete;
-    DirectAllocator& operator=(const DirectAllocator&) = delete;
+    void DestroyUnit(Unit& unit) {
+        RAII_t resource{*device, unit.res_ptr, *vk_allocation_callbacks};
+        resource.clear();
+        memory_resource->Deallocate(unit.mem);
+    }
 
-    ~DirectAllocator() noexcept override { Clear(); }
-
-    BufferAllocation AllocateBuffer(size_t size,
-                                    vk::BufferCreateFlags create_flags,
-                                    vk::BufferUsageFlags usage_flags,
-                                    const std::vector<uint32_t>& sharing_queue_family_indices) override {
-        size_t total_bytes = ((size / min_alignment) + static_cast<size_t>(size % min_alignment > 0)) * min_alignment;
-        MemoryAllocation allocation = memory_resource->Allocate(total_bytes);
-        vk::raii::Buffer buffer = device->createBuffer({
-            .flags=create_flags,
-            .size=static_cast<vk::DeviceSize>(size),
-            .usage=usage_flags,
-            .sharingMode=((sharing_queue_family_indices.size()) ? vk::SharingMode::eConcurrent : vk::SharingMode::eExclusive),
-            .queueFamilyIndexCount=static_cast<uint32_t>(sharing_queue_family_indices.size()),
-            .pQueueFamilyIndices=sharing_queue_family_indices.data()
-        }, *vk_allocation_callbacks);
-        buffer.bindMemory(allocation.ptr, allocation.offset);
-        VkBuffer_T* ptr = buffer.release();
-        buffers.push_back({.allocation=allocation, .ptr=ptr});
+    [[nodiscard]] ResourceAllocation_t DoAllocate(size_type size, RAII_t&& resource) {
+        auto allocation = memory_resource->Allocate(size);
+        resource.bindMemory(allocation.ptr, allocation.offset);
+        auto ptr = resource.release();
+        units.push_back({.mem=allocation, .res_ptr=ptr});
         return {.ptr=ptr, .offset=0, .size=size};
     }
 
-    void DeallocateBuffer(BufferAllocation allocation) override {
-        auto it = std::ranges::find_if(buffers, [rhs=allocation.ptr](VkBuffer_T* lhs) { return lhs == rhs; }, &BufferData::ptr);
-        if (it == buffers.end()) { throw std::runtime_error{"Unable to find allocated buffer for deallocation."}; }
-        DestroyBuffer(*it);
-        buffers.erase(it);
+    void DoDeallocate(ResourceAllocation_t allocation) {
+        auto it = std::ranges::find_if(units, [rhs=allocation.res_ptr](auto lhs) { return lhs == rhs; },
+                                       &Unit::res_ptr);
+        if (it == units.end()) { throw std::runtime_error{"Unable to find allocated resource for deallocation."}; }
+        DestroyUnit(*it);
+        units.erase(it);
     }
 
-    ImageAllocation AllocateImage() override { return {}; }
-
-    void DeallocateImage(ImageAllocation allocation) override {
-        auto it = std::ranges::find_if(images, [rhs=allocation.ptr](VkImage_T* lhs) { return lhs == rhs; }, &ImageData::ptr);
-        if (it == images.end()) { throw std::runtime_error{"Unable to find allocated image for deallocation."}; }
-        DestroyImage(*it);
-        images.erase(it);
+    auto Find(pointer_type ptr) {
+        return std::ranges::find_if(units, [rhs=ptr](auto lhs) { return lhs == rhs; }, &Unit::res_ptr);
     }
-
-    void Clear() {
-        for (BufferData& data : buffers) { DestroyBuffer(data); }
-        buffers.clear();
-        for (ImageData& data : images) { DestroyImage(data); }
-        images.clear();
-    }
-
-private:
-    void DestroyBuffer(BufferData& data) {
-        vk::raii::Buffer buffer{*device, data.ptr, *vk_allocation_callbacks};
-        buffer.clear();
-        memory_resource->Deallocate(data.allocation);
-    }
-
-    void DestroyImage(ImageData& data) {
-        vk::raii::Image image{*device, data.ptr, *vk_allocation_callbacks};
-        image.clear();
-        memory_resource->Deallocate(data.allocation);
-    }
-};
-
-
-#if 0
-class AdhocAllocator : public Allocator {
-    template <typename T>
-    struct Data {
-        Allocation allocation;
-        T* buffer;
-    };
-
-    MemoryResource* memory_resource;
-    vk::raii::Device* device;
-    vk::AllocationCallbacks* vk_allocation_callbacks;
-    size_t min_align;
-    std::vector<Data<VkBuffer_T>> buffer_data{};
-    std::vector<Data<VkImage_T>> image_data{};
 
 public:
-    DirectAllocator(MemoryResource& memory_resource,
-                    vk::raii::Device& device,
-                    vk::AllocationCallbacks& vk_allocation_callbacks)
+    ResourceBase(jms::memory::Resource<MemoryAllocation_t>& memory_resource,
+                 vk::raii::Device& device,
+                 vk::AllocationCallbacks& vk_allocation_callbacks)
     : memory_resource{std::addressof(memory_resource)},
       device{std::addressof(device)},
       vk_allocation_callbacks{std::addressof(vk_allocation_callbacks)}
     {}
+    ResourceBase(const ResourceBase&) = delete;
+    ResourceBase& operator=(const ResourceBase&) = delete;
+    ~ResourceBase() noexcept override { Clear(); }
+};
 
-    Allocation_t<VkBuffer_T> AllocateBuffer(size_t num_units,
-                                            vk::BufferUsageFlags usage_flags=vk::BufferUsageFlagBits::eUniformBuffer,
-                                            vk::BufferCreateFlags create_flags={},
-                                            const std::vector<uint32_t>& sharing_queue_family_indices={}) override {
-        size_t total_bytes = ((num_units / min_align) + static_cast<size_t>(num_units % min_align > 0)) * min_align;
-        Allocation allocation = memory_resource->Allocate(total_bytes);
-        vk::SharingMode sharing_mode = (sharing_queue_family_indices.size()) ? vk::SharingMode::eConcurrent : vk::SharingMode::eExclusive;
-        vk::raii::Buffer buffer = device->createBuffer({
+
+template <typename MemoryAllocation_t, template <typename> typename Container>
+class BufferResource : public ResourceBase<BufferAllocation, vk::raii::Buffer, MemoryAllocation_t, Container> {
+    using size_type = BufferAllocation::size_type;
+
+    vk::BufferCreateFlags create_flags;
+    vk::BufferUsageFlags usage_flags;
+    vk::SharingMode sharing_mode;
+    const std::vector<uint32_t>& sharing_queue_family_indices;
+
+public:
+    BufferResource(jms::memory::Resource<MemoryAllocation_t>& memory_resource,
+                   vk::raii::Device& device,
+                   vk::AllocationCallbacks& vk_allocation_callbacks,
+                   vk::BufferCreateFlags create_flags,
+                   vk::BufferUsageFlags usage_flags,
+                   const std::vector<uint32_t>& sharing_queue_family_indices)
+    : ResourceBase{memory_resource, device, vk_allocation_callbacks},
+      create_flags{create_flags},
+      usage_flags{usage_flags},
+      sharing_mode{sharing_queue_family_indices.empty() ? vk::SharingMode::eExclusive : vk::SharingMode::eConcurrent},
+      sharing_queue_family_indices{sharing_queue_family_indices}
+    {}
+    BufferResource(const BufferResource&) = delete;
+    BufferResource& operator=(const BufferResource&) = delete;
+    ~BufferResource() noexcept override = default;
+
+    [[nodiscard]] BufferAllocation Allocate(size_type size) override {
+        if (size < 1) { throw std::bad_alloc{}; }
+        return DoAllocate(size, device->createBuffer({
             .flags=create_flags,
-            .size=static_cast<vk::DeviceSize>(num_units),
+            .size=size,
             .usage=usage_flags,
             .sharingMode=sharing_mode,
             .queueFamilyIndexCount=static_cast<uint32_t>(sharing_queue_family_indices.size()),
             .pQueueFamilyIndices=sharing_queue_family_indices.data()
-        }, *vk_allocation_callbacks);
-        buffer.bindMemory(allocation.ptr, allocation.offset);
-        VkBuffer_T* raw_buffer = buffer.release();
-        buffer_data.push_back({.allocation=allocation, .buffer=raw_buffer});
-        return {.buffer=raw_buffer, .offset=0, .num_units=num_units};
+        }, *vk_allocation_callbacks));
     }
 
-    void DeallocateBuffer(Allocation_t<VkBuffer_T> allocation) override {}
+    void Deallocate(BufferAllocation allocation) override { DoDeallocate(allocation); }
 
-    Allocation_t<VkImage_T> AllocateImage() override {}
-    void DeallocateImage(Allocation_t<VkImage_T> allocation) override {}
+    bool IsEqual(const jms::memory::Resource<BufferAllocation>& other) const noexcept override {
+        const BufferResource* res = dynamic_cast<const BufferResource*>(std::addressof(other));
+        return this->memory_resource              == res->memory_resource &&
+               this->device                       == res->device &&
+               this->vk_allocation_callbacks      == res->vk_allocation_callbacks &&
+               this->create_flags                 == res->create_flags &&
+               this->usage_flags                  == res->usage_flags &&
+               this->sharing_mode                 == res->sharing_mode &&
+               this->sharing_queue_family_indices == res->sharing_queue_family_indices;
+    }
 };
 
 
-    vk::DescriptorSetLayoutBinding Bind(uint32_t binding, vk::ShaderStageFlags stage_flags) const noexcept {
-        vk::DescriptorBufferInfo camera_buffer_info{
-            .buffer=*camera_buffer.buffer,
-            .offset=0,
-            .range=camera_buffer.buffer_size
-        };
-        return vk::DescriptorSetLayoutBinding{
-            .binding=binding,
-            .descriptorType=vk::DescriptorType::eUniformBuffer,
-            .descriptorCount=1,
-            .stageFlags=stage_flags,
-            .pImmutableSamplers=nullptr
-        };
-    }
+/*
+template <typename MemoryAllocation_t, template <typename> typename Container>
+class ImageResource : public ResourceBase<ImageAllocation, vk::raii::Image, MemoryAllocation_t, Container> {
+    using size_type = ImageAllocation::size_type;
+
+    vk::BufferCreateFlags create_flags;
+    vk::BufferUsageFlags usage_flags;
+    vk::SharingMode sharing_mode;
+    const std::vector<uint32_t>& sharing_queue_family_indices;
+
+public:
+    ImageResource(jms::memory::Resource<MemoryAllocation_t>& memory_resource,
+                  vk::raii::Device& device,
+                  vk::AllocationCallbacks& vk_allocation_callbacks,
+                  vk::BufferCreateFlags create_flags,
+                  vk::BufferUsageFlags usage_flags,
+                  const std::vector<uint32_t>& sharing_queue_family_indices)
+    : ResourceBase{memory_resource, device, vk_allocation_callbacks},
+      create_flags{create_flags},
+      usage_flags{usage_flags},
+      sharing_mode{sharing_queue_family_indices.empty() ? vk::SharingMode::eExclusive : vk::SharingMode::eConcurrent},
+      sharing_queue_family_indices{sharing_queue_family_indices}
+    {}
+    ImageResource(const ImageResource&) = delete;
+    ImageResource& operator=(const ImageResource&) = delete;
+    ~ImageResource() noexcept override = default;
+
+    [[nodiscard]] ImageAllocation Allocate(size_type size) override {
+        if (size < 1) { throw std::bad_alloc{}; }
+        return DoAllocate(size, device->createImage({
+#if 0
+            .flags=create_flags,
+            .size=size,
+            .usage=usage_flags,
+            .sharingMode=sharing_mode,
+            .queueFamilyIndexCount=static_cast<uint32_t>(sharing_queue_family_indices.size()),
+            .pQueueFamilyIndices=sharing_queue_family_indices.data()
 #endif
+        }, *vk_allocation_callbacks));
+    }
+
+    void Deallocate(ImageAllocation allocation) override { DoDeallocate(allocation); }
+
+    bool IsEqual(const jms::memory::Resource<BufferAllocation>& other) const noexcept override {
+        const ImageResource* res = dynamic_cast<const ImageResource*>(std::addressof(other));
+        return this->memory_resource              == res->memory_resource &&
+               this->device                       == res->device &&
+               this->vk_allocation_callbacks      == res->vk_allocation_callbacks &&
+               this->create_flags                 == res->create_flags &&
+               this->usage_flags                  == res->usage_flags &&
+               this->sharing_mode                 == res->sharing_mode &&
+               this->sharing_queue_family_indices == res->sharing_queue_family_indices;
+    }
+};
+*/
+
+
+} // namespace vulkan
+} // namespace jms

@@ -1,10 +1,11 @@
 #include "glfw.hpp"
 
+#ifdef VK_USE_PLATFORM_WIN32_KHR
+#include <format>
+#endif
 #include <stdexcept>
 #include <string>
 #include <vector>
-
-#include <fmt/core.h>
 
 
 namespace jms {
@@ -18,7 +19,7 @@ void Environment::EnableHIDPI() {
     if (!SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)) {
         auto error = GetLastError();
         if (error != ERROR_ACCESS_DENIED) { // ERROR_ACCESS_DENIED == already set; ignore error
-            throw std::runtime_error(fmt::format("WIN32: Failed to set dpi awareness: {}\n", error));
+            throw std::runtime_error(std::format("WIN32: Failed to set dpi awareness: {}\n", error));
         }
     }
 #endif
