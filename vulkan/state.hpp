@@ -87,11 +87,6 @@ struct State {
 
     void InitDevice(const vk::raii::PhysicalDevice& physical_device, DeviceConfig&& cfg);
     void InitInstance(InstanceConfig&& cfg);
-    void InitMemory(const size_t size_in_bytes,
-                    const vk::Flags<vk::BufferUsageFlagBits> buffer_usage_bits,
-                    const vk::Flags<vk::MemoryPropertyFlagBits> memory_prop_bits,
-                    const vk::raii::PhysicalDevice& physical_device,
-                    const vk::raii::Device& device);
     void InitPipeline(const vk::raii::Device& device, const vk::raii::RenderPass& render_pass, const vk::Extent2D target_extent, const VertexDescription& vertex_desc, const std::vector<vk::DescriptorSetLayoutBinding>& layout_bindings, const std::vector<jms::vulkan::shader::Info>& shaders);
     void InitQueues(const vk::raii::Device& device, const uint32_t queue_family_index);
     void InitRenderPass(const vk::raii::Device& device, const vk::Format pixel_format, const vk::Extent2D target_extent);
@@ -179,31 +174,6 @@ void State::InitInstance(InstanceConfig&& cfg) {
     }
 
     physical_devices = vk::raii::PhysicalDevices{instance};
-}
-
-
-void State::InitMemory(const size_t size_in_bytes,
-                       const vk::Flags<vk::BufferUsageFlagBits> buffer_usage_bits,
-                       const vk::Flags<vk::MemoryPropertyFlagBits> memory_prop_bits,
-                       const vk::raii::PhysicalDevice& physical_device,
-                       const vk::raii::Device& device) {
-#if 0
-    buffers.push_back(vk::raii::Buffer{device, {
-        .size=size_in_bytes,
-        .usage=buffer_usage_bits,
-        .sharingMode=vk::SharingMode::eExclusive
-    }});
-    const auto& buffer = buffers.back();
-    buffers_mem_reqs.push_back(buffer.getMemoryRequirements());
-    const auto& vertex_mem_reqs = buffers_mem_reqs.back();
-    uint32_t memory_type_index = FindMemoryTypeIndex(physical_device, memory_prop_bits, vertex_mem_reqs.memoryTypeBits);
-    device_memory.push_back(device.allocateMemory({
-        .allocationSize=vertex_mem_reqs.size,
-        .memoryTypeIndex=memory_type_index
-    }));
-
-    buffer.bindMemory(*(device_memory.back()), 0);
-#endif
 }
 
 

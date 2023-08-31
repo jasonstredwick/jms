@@ -66,7 +66,7 @@ public:
 
     vk::raii::Device& GetDevice() const noexcept { return *device; }
     vk::AllocationCallbacks& GetAllocationCallbacks() const noexcept { return *vk_allocation_callbacks; }
-    uint32_t GetMemoryType() const noexcept { return memory_type_index; }
+    uint32_t GetMemoryTypeIndex() const noexcept { return memory_type_index; }
 };
 
 
@@ -116,18 +116,18 @@ public:
  *        within suballocated DeviceMemory separated using page/block/chunk units.
  */
 template <template <typename> typename Container, typename Mutex_t/*=jms::NoMutex*/>
-class HostVisibleDeviceMemory : public std::pmr::memory_resource {
-    using pointer_type = Resource<DeviceMemoryAllocation>::allocation_type::pointer_type;
-    using size_type = Resource<DeviceMemoryAllocation>::allocation_type::size_type;
+class HostVisibleDeviceMemoryResource : public std::pmr::memory_resource {
+    using pointer_type = jms::memory::Resource<DeviceMemoryAllocation>::allocation_type::pointer_type;
+    using size_type = jms::memory::Resource<DeviceMemoryAllocation>::allocation_type::size_type;
     static_assert(std::is_convertible_v<size_t, size_type>,
-                  "HostVisibleDeviceMemory::size_type is not convertible from size_t");
+                  "HostVisibleDeviceMemoryResource::size_type is not convertible from size_t");
 
     struct Result {
         DeviceMemoryResource* upstream;
         DeviceMemoryAllocation allocation;
         Result(DeviceMemoryResource* a, DeviceMemoryAllocation b) : upstream{a}, allocation{b} {}
         ~Result() { if (allocation.ptr) { upstream->Deallocate(allocation); } }
-        DeviceMemoryAllocation Reset() { allocation.ptr = nullptr; }
+        void Reset() { allocation.ptr = nullptr; }
     };
     struct MappedData { DeviceMemoryAllocation allocation; void* mapped_ptr; };
 
@@ -170,12 +170,10 @@ class HostVisibleDeviceMemory : public std::pmr::memory_resource {
     }
 
 public:
-    HostVisibleDeviceMemory(DeviceMemoryResource& upstream, size_t min_alignment=alignof(std::max_align_t)) noexcept
-    : upstream{std::addressof(upstream)}, min_alignment{min_alignment}
-    {}
-    HostVisibleDeviceMemory(const HostVisibleDeviceMemory&) = delete;
-    HostVisibleDeviceMemory& operator=(const HostVisibleDeviceMemory&) = delete;
-    ~HostVisibleDeviceMemory() noexcept override { Clear(); }
+    HostVisibleDeviceMemoryResource(DeviceMemoryResource& upstream) noexcept : upstream{std::addressof(upstream)} {}
+    HostVisibleDeviceMemoryResource(const HostVisibleDeviceMemoryResource&) = delete;
+    HostVisibleDeviceMemoryResource& operator=(const HostVisibleDeviceMemoryResource&) = delete;
+    ~HostVisibleDeviceMemoryResource() noexcept override { Clear(); }
 
     void Clear() {
         std::lock_guard lock{mutex};
@@ -184,6 +182,38 @@ public:
             upstream->Deallocate(data.allocation);
         }
         allocations.clear();
+    }
+
+    vk::raii::Buffer AsBuffer(void* p,
+                              size_t size_in_bytes,
+                              vk::BufferUsageFlags usage_flags,
+                              vk::BufferCreateFlags create_flags = {},
+                              const std::vector<uint32_t>& sharing_queue_family_indices = {}) {
+        vk::raii::Buffer buffer = upstream->GetDevice().createBuffer({
+            .flags=create_flags,
+            .size=static_cast<vk::DeviceSize>(size_in_bytes),
+            .usage=usage_flags,
+            .sharingMode=(sharing_queue_family_indices.empty() ? vk::SharingMode::eExclusive : vk::SharingMode::eConcurrent),
+            .queueFamilyIndexCount=static_cast<uint32_t>(sharing_queue_family_indices.size()),
+            .pQueueFamilyIndices=sharing_queue_family_indices.data()
+        }, upstream->GetAllocationCallbacks());
+        auto reqs = buffer.getMemoryRequirements();
+
+        std::lock_guard lock{mutex};
+        auto it = std::ranges::find_if(allocations, [rhs=p](void* lhs) { return lhs == rhs; }, &MappedData::mapped_ptr);
+        if (it == allocations.end()) { throw std::runtime_error{"Unable to find allocation to generate a buffer."}; }
+
+        // verify mapped memory can be used for this buffer or throw exception
+        if (!(1 << upstream->GetMemoryTypeIndex()) & reqs.memoryTypeBits) {
+            throw std::runtime_error{"HostVisibleDeviceMemoryResource not compatible with VkBuffer memory types."};
+        } else if (size_in_bytes != reqs.size) {
+            throw std::runtime_error{"HostVisibleDeviceMemoryResource size mismatch with VkBuffer."};
+        }
+        // alignment should always work since each allocation is direct from DeviceMemory and offset is zero.
+
+        buffer.bindMemory(it->allocation.ptr, 0);
+
+        return buffer;
     }
 };
 

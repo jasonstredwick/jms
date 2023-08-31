@@ -139,7 +139,7 @@ enum class DescriptorFrequency {
  * Fallback could also be defined as wrapper memory_resource or allocator that contains an ordered list of memory resources, etc
  * that checks for certain exceptions raised and call the next in line.  Should be easy to create the list using base class pointers.
 */
-class Memory {
+class MemoryHelper {
     const vk::raii::PhysicalDevice& physical_device;
     vk::raii::Device* device;
     vk::AllocationCallbacks* vk_allocation_callbacks;
@@ -154,16 +154,21 @@ class Memory {
     size_t min_storage_alignment;
 
 public:
-    Memory(const vk::raii::PhysicalDevice& physical_device, vk::raii::Device& device, vk::AllocationCallbacks& vk_allocation_callbacks)
+    MemoryHelper(const vk::raii::PhysicalDevice& physical_device, vk::raii::Device& device, vk::AllocationCallbacks& vk_allocation_callbacks)
     : physical_device{physical_device}, device{std::addressof(device)}, vk_allocation_callbacks{std::addressof(vk_allocation_callbacks)}
     { Init(); }
 
-    DirectMemoryResource CreateDirectMemoryResource(uint32_t memory_type_index) {
+    DeviceMemoryResource CreateDirectMemoryResource(uint32_t memory_type_index) {
         // validate requested index ... { throw std::runtime_error{"CreateDirectMemoryResource requires valid memory_type_index."}; }
         return {*device, *vk_allocation_callbacks, memory_type_index};
     }
 
-    DirectMemoryResource CreateDirectMemoryResource(AccessDirection access_direction) {
+    DeviceMemoryResourceAligned CreateDirectMemoryResource(uint32_t memory_type_index, vk::DeviceSize alignment) {
+        // validate requested index ... { throw std::runtime_error{"CreateDirectMemoryResource requires valid memory_type_index."}; }
+        return {*device, *vk_allocation_callbacks, memory_type_index, alignment};
+    }
+
+    DeviceMemoryResource CreateDirectMemoryResource(AccessDirection access_direction) {
         uint32_t index = 0;
         if      (access_direction == AccessDirection::DEVICE)          { index = optimal_pipeline_memory_type_index; }
         else if (access_direction == AccessDirection::HOST_READ)       { index = optimal_read_memory_type_index; }
@@ -173,11 +178,38 @@ public:
         return {*device, *vk_allocation_callbacks, index};
     }
 
-    template <MemoryResource_c T>
-    T CreateMemoryResource(auto&&... args) { return {std::forward<decltype(args)>(args)...}; }
+    template <template <typename> typename Container, typename Mutex_t>
+    HostVisibleDeviceMemoryResource<Container, Mutex_t> CreateHostVisibleDeviceMemoryResource(DeviceMemoryResource& upstream) {
+        auto memory_type_index = upstream.GetMemoryTypeIndex();
+        auto props = physical_device.getMemoryProperties();
+        auto flags = props.memoryTypes[memory_type_index].propertyFlags;
+        if (!IsHostVisibleDeviceMemoryResourceCapableMemoryType(flags)) {
+            throw std::runtime_error{"CreateHostVisibleDeviceMemoryResource: invalid memory_type_index provided."};
+        }
+        return HostVisibleDeviceMemoryResource<Container, Mutex_t>{upstream};
+    }
 
-    template <AllocatorResource_c T>
-    T CreateAllocator(auto&&... args) { return {std::forward<decltype(args)>(args)...}; }
+    template <typename MemoryResource_t> // template <MemoryResource_c T>
+    MemoryResource_t CreateMemoryResource(auto&&... args) { return {std::forward<decltype(args)>(args)...}; }
+
+    template <typename AllocatorResource_t> // template <AllocatorResource_c T>
+    AllocatorResource_t CreateResourceAllocator(auto&&... args) { return {std::forward<decltype(args)>(args)...}; }
+
+    uint32_t GetHostVisibleDeviceMemoryResourceCapableMemoryType() {
+        auto props = physical_device.getMemoryProperties();
+        for (auto i : std::views::iota(static_cast<uint32_t>(0), props.memoryTypeCount)) {
+            auto flags = props.memoryTypes[i].propertyFlags;
+            if (IsHostVisibleDeviceMemoryResourceCapableMemoryType(flags)) { return i; }
+        }
+        return std::numeric_limits<uint32_t>::max();
+    }
+
+    bool IsHostVisibleDeviceMemoryResourceCapableMemoryType(vk::MemoryPropertyFlags flags) noexcept {
+        return flags & vk::MemoryPropertyFlagBits::eHostVisible &&
+               flags & vk::MemoryPropertyFlagBits::eHostCoherent &&
+               !(flags & vk::MemoryPropertyFlagBits::eHostCached) &&
+               !(flags & vk::MemoryPropertyFlagBits::eLazilyAllocated);
+    }
 
 private:
     void Init() {

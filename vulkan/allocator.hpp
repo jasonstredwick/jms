@@ -66,10 +66,6 @@ protected:
         units.erase(it);
     }
 
-    auto Find(pointer_type ptr) {
-        return std::ranges::find_if(units, [rhs=ptr](auto lhs) { return lhs == rhs; }, &Unit::res_ptr);
-    }
-
 public:
     ResourceBase(jms::memory::Resource<MemoryAllocation_t>& memory_resource,
                  vk::raii::Device& device,
@@ -112,17 +108,17 @@ public:
 
     [[nodiscard]] BufferAllocation Allocate(size_type size) override {
         if (size < 1) { throw std::bad_alloc{}; }
-        return DoAllocate(size, device->createBuffer({
+        return DoAllocate(size, this->device->createBuffer({
             .flags=create_flags,
             .size=size,
             .usage=usage_flags,
             .sharingMode=sharing_mode,
             .queueFamilyIndexCount=static_cast<uint32_t>(sharing_queue_family_indices.size()),
             .pQueueFamilyIndices=sharing_queue_family_indices.data()
-        }, *vk_allocation_callbacks));
+        }, *this->vk_allocation_callbacks));
     }
 
-    void Deallocate(BufferAllocation allocation) override { DoDeallocate(allocation); }
+    void Deallocate(BufferAllocation allocation) override { this->DoDeallocate(allocation); }
 
     bool IsEqual(const jms::memory::Resource<BufferAllocation>& other) const noexcept override {
         const BufferResource* res = dynamic_cast<const BufferResource*>(std::addressof(other));
