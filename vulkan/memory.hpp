@@ -20,6 +20,7 @@
 
 
 #include <bit>
+#include <functional>
 #include <iterator>
 #include <limits>
 #include <span>
@@ -27,7 +28,6 @@
 #include <tuple>
 
 
-#include "jms/vulkan/allocator.hpp"
 #include "jms/vulkan/memory_resource.hpp"
 #include "jms/vulkan/vulkan.hpp"
 
@@ -192,24 +192,49 @@ public:
     template <typename MemoryResource_t> // template <MemoryResource_c T>
     MemoryResource_t CreateMemoryResource(auto&&... args) { return {std::forward<decltype(args)>(args)...}; }
 
-    template <typename AllocatorResource_t> // template <AllocatorResource_c T>
-    AllocatorResource_t CreateResourceAllocator(auto&&... args) { return {std::forward<decltype(args)>(args)...}; }
+    template <typename Resource_t> // template <Resource_c T>
+    Resource_t CreateResource(auto&&... args) { return {std::forward<decltype(args)>(args)...}; }
 
-    uint32_t GetHostVisibleDeviceMemoryResourceCapableMemoryType() {
+    uint32_t GetDeviceLocalMemoryType() {
         auto props = physical_device.getMemoryProperties();
         for (auto i : std::views::iota(static_cast<uint32_t>(0), props.memoryTypeCount)) {
             auto flags = props.memoryTypes[i].propertyFlags;
-            if (IsHostVisibleDeviceMemoryResourceCapableMemoryType(flags)) { return i; }
+            if (IsDeviceLocal(flags)) { return i; }
         }
         return std::numeric_limits<uint32_t>::max();
     }
 
-    bool IsHostVisibleDeviceMemoryResourceCapableMemoryType(vk::MemoryPropertyFlags flags) noexcept {
-        return flags & vk::MemoryPropertyFlagBits::eHostVisible &&
-               flags & vk::MemoryPropertyFlagBits::eHostCoherent &&
-               !(flags & vk::MemoryPropertyFlagBits::eHostCached) &&
-               !(flags & vk::MemoryPropertyFlagBits::eLazilyAllocated);
+    uint32_t GetHostVisibleDeviceMemoryResourceCapableMemoryType(vk::MemoryPropertyFlags opt_flags = {}) {
+        auto props = physical_device.getMemoryProperties();
+        for (auto i : std::views::iota(static_cast<uint32_t>(0), props.memoryTypeCount)) {
+            auto flags = props.memoryTypes[i].propertyFlags;
+            if (IsHostVisibleDeviceMemoryResourceCapableMemoryType(flags) && (flags & opt_flags) == opt_flags) {
+                return i;
+            }
+        }
+        return std::numeric_limits<uint32_t>::max();
     }
+
+    uint32_t GetIndexOrThrow(auto&& GetMemoryIndexFunc) {
+        uint32_t result = std::invoke(GetMemoryIndexFunc, this);
+        if (IsMemoryTypeIndexOutOfBounds(result)) {
+            throw std::runtime_error{"Could not find a suitable, requested memory type."};
+        }
+        return result;
+    }
+
+    bool IsDeviceLocal(vk::MemoryPropertyFlags flags) noexcept {
+        return static_cast<bool>(flags & vk::MemoryPropertyFlagBits::eDeviceLocal);
+    }
+
+    bool IsHostVisibleDeviceMemoryResourceCapableMemoryType(vk::MemoryPropertyFlags flags) noexcept {
+        return static_cast<bool>(flags & vk::MemoryPropertyFlagBits::eHostVisible) &&
+               static_cast<bool>(flags & vk::MemoryPropertyFlagBits::eHostCoherent) &&
+               !static_cast<bool>(flags & vk::MemoryPropertyFlagBits::eHostCached) &&
+               !static_cast<bool>(flags & vk::MemoryPropertyFlagBits::eLazilyAllocated);
+    }
+
+    bool IsMemoryTypeIndexOutOfBounds(uint32_t i) { return i == std::numeric_limits<uint32_t>::max(); }
 
 private:
     void Init() {

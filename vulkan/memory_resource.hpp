@@ -3,11 +3,13 @@
 
 #include <algorithm>
 #include <bit>
+#include <functional>
 #include <memory>
 #include <memory_resource>
 #include <mutex>
 #include <new>
 #include <stdexcept>
+#include <vector>
 #include <type_traits>
 
 #include "jms/memory/allocation.hpp"
@@ -19,7 +21,9 @@ namespace jms {
 namespace vulkan {
 
 
+using BufferAllocation = jms::memory::Allocation<VkBuffer_T, vk::DeviceSize>;
 using DeviceMemoryAllocation = jms::memory::Allocation<VkDeviceMemory_T, vk::DeviceSize>;
+using ImageAllocation = jms::memory::Allocation<VkImage_T, vk::DeviceSize>;
 
 
 // device.allocateMemory is thread safe : https://stackoverflow.com/questions/51528553/can-i-use-vkdevice-from-multiple-threads-concurrently
@@ -115,7 +119,7 @@ public:
  *        of DeviceMemoryResource to enforce a fixed alignment on every allocation.  This can help keep arrays
  *        within suballocated DeviceMemory separated using page/block/chunk units.
  */
-template <template <typename> typename Container, typename Mutex_t/*=jms::NoMutex*/>
+template <template <typename> typename Container_t, typename Mutex_t/*=jms::NoMutex*/>
 class HostVisibleDeviceMemoryResource : public std::pmr::memory_resource {
     using pointer_type = jms::memory::Resource<DeviceMemoryAllocation>::allocation_type::pointer_type;
     using size_type = jms::memory::Resource<DeviceMemoryAllocation>::allocation_type::size_type;
@@ -132,7 +136,7 @@ class HostVisibleDeviceMemoryResource : public std::pmr::memory_resource {
     struct MappedData { DeviceMemoryAllocation allocation; void* mapped_ptr; };
 
     DeviceMemoryResource* upstream;
-    Container<MappedData> allocations{};
+    Container_t<MappedData> allocations{};
     Mutex_t mutex{};
 
     void* do_allocate(size_t bytes, size_t alignment) override {
@@ -216,6 +220,181 @@ public:
         return buffer;
     }
 };
+
+
+template <typename ResourceAllocation_t,
+          typename RAII_t,
+          typename MemoryAllocation_t,
+          template <typename> typename Container_t,
+          typename Mutex_t/*=jms::NoMutex*/>
+class ResourceBase : jms::memory::Resource<ResourceAllocation_t> {
+protected:
+    using pointer_type = ResourceAllocation_t::pointer_type;
+    using size_type = ResourceAllocation_t::size_type;
+
+    struct Unit {
+        MemoryAllocation_t mem;
+        pointer_type res_ptr;
+    };
+
+    Container_t<Unit> units{};
+    jms::memory::Resource<MemoryAllocation_t>* memory_resource;
+    vk::raii::Device* device;
+    vk::AllocationCallbacks* vk_allocation_callbacks;
+    Mutex_t mutex{};
+
+    void Clear() {
+        std::lock_guard<Mutex_t> lock{mutex};
+        for (Unit& unit : units) { DestroyUnit(unit); }
+        units.clear();
+    }
+
+    void DestroyUnit(Unit& unit) {
+        RAII_t resource{*device, unit.res_ptr, *vk_allocation_callbacks};
+        resource.clear();
+        memory_resource->Deallocate(unit.mem);
+    }
+
+    [[nodiscard]] ResourceAllocation_t DoAllocate(size_type size, RAII_t&& resource) {
+        std::lock_guard<Mutex_t> lock{mutex};
+        auto allocation = memory_resource->Allocate(size);
+        resource.bindMemory(allocation.ptr, allocation.offset);
+        auto ptr = resource.release();
+        units.push_back({.mem=allocation, .res_ptr=ptr});
+        return {.ptr=ptr, .offset=0, .size=size};
+    }
+
+    void DoDeallocate(ResourceAllocation_t allocation) {
+        std::lock_guard<Mutex_t> lock{mutex};
+        auto it = std::ranges::find_if(units, [rhs=allocation.res_ptr](auto lhs) { return lhs == rhs; },
+                                       &Unit::res_ptr);
+        if (it == units.end()) { throw std::runtime_error{"Unable to find allocated resource for deallocation."}; }
+        DestroyUnit(*it);
+        units.erase(it);
+    }
+
+public:
+    ResourceBase(jms::memory::Resource<MemoryAllocation_t>& memory_resource,
+                 vk::raii::Device& device,
+                 vk::AllocationCallbacks& vk_allocation_callbacks)
+    : memory_resource{std::addressof(memory_resource)},
+      device{std::addressof(device)},
+      vk_allocation_callbacks{std::addressof(vk_allocation_callbacks)}
+    {}
+    ResourceBase(const ResourceBase&) = delete;
+    ResourceBase& operator=(const ResourceBase&) = delete;
+    ~ResourceBase() noexcept override { Clear(); }
+};
+
+
+template <typename MemoryAllocation_t, template <typename> typename Container_t, typename Mutex_t/*=jms::NoMutex*/>
+class BufferResource : public ResourceBase<BufferAllocation, vk::raii::Buffer, MemoryAllocation_t, Container_t, Mutex_t> {
+    using size_type = BufferAllocation::size_type;
+
+    vk::BufferCreateFlags create_flags;
+    vk::BufferUsageFlags usage_flags;
+    vk::SharingMode sharing_mode;
+    const std::vector<uint32_t>& sharing_queue_family_indices;
+
+public:
+    BufferResource(jms::memory::Resource<MemoryAllocation_t>& memory_resource,
+                   vk::raii::Device& device,
+                   vk::AllocationCallbacks& vk_allocation_callbacks,
+                   vk::BufferUsageFlags usage_flags,
+                   vk::BufferCreateFlags create_flags = {},
+                   const std::vector<uint32_t>& sharing_queue_family_indices = {})
+    : ResourceBase{memory_resource, device, vk_allocation_callbacks},
+      create_flags{create_flags},
+      usage_flags{usage_flags},
+      sharing_mode{sharing_queue_family_indices.empty() ? vk::SharingMode::eExclusive : vk::SharingMode::eConcurrent},
+      sharing_queue_family_indices{sharing_queue_family_indices}
+    {}
+    BufferResource(const BufferResource&) = delete;
+    BufferResource& operator=(const BufferResource&) = delete;
+    ~BufferResource() noexcept override = default;
+
+    [[nodiscard]] BufferAllocation Allocate(size_type size) override {
+        if (size < 1) { throw std::bad_alloc{}; }
+        return DoAllocate(size, this->device->createBuffer({
+            .flags=create_flags,
+            .size=size,
+            .usage=usage_flags,
+            .sharingMode=sharing_mode,
+            .queueFamilyIndexCount=static_cast<uint32_t>(sharing_queue_family_indices.size()),
+            .pQueueFamilyIndices=sharing_queue_family_indices.data()
+        }, *this->vk_allocation_callbacks));
+    }
+
+    void Deallocate(BufferAllocation allocation) override { this->DoDeallocate(allocation); }
+
+    bool IsEqual(const jms::memory::Resource<BufferAllocation>& other) const noexcept override {
+        const BufferResource* res = dynamic_cast<const BufferResource*>(std::addressof(other));
+        return this->memory_resource              == res->memory_resource &&
+               this->device                       == res->device &&
+               this->vk_allocation_callbacks      == res->vk_allocation_callbacks &&
+               this->create_flags                 == res->create_flags &&
+               this->usage_flags                  == res->usage_flags &&
+               this->sharing_mode                 == res->sharing_mode &&
+               this->sharing_queue_family_indices == res->sharing_queue_family_indices;
+    }
+};
+
+
+/*
+template <typename MemoryAllocation_t, template <typename> typename Container_t, typename Mutex_t>
+class ImageResource : public ResourceBase<ImageAllocation, vk::raii::Image, MemoryAllocation_t, Container_t, Mutex_t> {
+    using size_type = ImageAllocation::size_type;
+
+    vk::BufferCreateFlags create_flags;
+    vk::BufferUsageFlags usage_flags;
+    vk::SharingMode sharing_mode;
+    const std::vector<uint32_t>& sharing_queue_family_indices;
+
+public:
+    ImageResource(jms::memory::Resource<MemoryAllocation_t>& memory_resource,
+                  vk::raii::Device& device,
+                  vk::AllocationCallbacks& vk_allocation_callbacks,
+                  vk::BufferUsageFlags usage_flags,
+                  vk::BufferCreateFlags create_flags = {},
+                  const std::vector<uint32_t>& sharing_queue_family_indices = {})
+    : ResourceBase{memory_resource, device, vk_allocation_callbacks},
+      create_flags{create_flags},
+      usage_flags{usage_flags},
+      sharing_mode{sharing_queue_family_indices.empty() ? vk::SharingMode::eExclusive : vk::SharingMode::eConcurrent},
+      sharing_queue_family_indices{sharing_queue_family_indices}
+    {}
+    ImageResource(const ImageResource&) = delete;
+    ImageResource& operator=(const ImageResource&) = delete;
+    ~ImageResource() noexcept override = default;
+
+    [[nodiscard]] ImageAllocation Allocate(size_type size) override {
+        if (size < 1) { throw std::bad_alloc{}; }
+        return DoAllocate(size, device->createImage({
+#if 0
+            .flags=create_flags,
+            .size=size,
+            .usage=usage_flags,
+            .sharingMode=sharing_mode,
+            .queueFamilyIndexCount=static_cast<uint32_t>(sharing_queue_family_indices.size()),
+            .pQueueFamilyIndices=sharing_queue_family_indices.data()
+#endif
+        }, *vk_allocation_callbacks));
+    }
+
+    void Deallocate(ImageAllocation allocation) override { DoDeallocate(allocation); }
+
+    bool IsEqual(const jms::memory::Resource<BufferAllocation>& other) const noexcept override {
+        const ImageResource* res = dynamic_cast<const ImageResource*>(std::addressof(other));
+        return this->memory_resource              == res->memory_resource &&
+               this->device                       == res->device &&
+               this->vk_allocation_callbacks      == res->vk_allocation_callbacks &&
+               this->create_flags                 == res->create_flags &&
+               this->usage_flags                  == res->usage_flags &&
+               this->sharing_mode                 == res->sharing_mode &&
+               this->sharing_queue_family_indices == res->sharing_queue_family_indices;
+    }
+};
+*/
 
 
 } // namespace vulkan
