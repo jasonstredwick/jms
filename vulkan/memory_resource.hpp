@@ -107,121 +107,6 @@ public:
 };
 
 
-/***
- * This class allows for direct GPU device memory as normal system memory for things such as std::vector.  Due to
- * the method of allocation by c++, this cannot provide suballocation of device memory.  Instead each allocation
- * is mapped 1:1 DeviceMemory and do_allocate.  That is why I am using DeviceMemoryResource directly rather than
- * allowing an interface to an alternate.  In order to provide suballocation, this will require pooling and other
- * algorithms to work on top of this class such as std::pmr::monotonic_buffer_resource or jms/memory/strategies.
- *
- * *TODO: Use this class with different allocation strategies and resource types to determine the class should
- *        be constructed with a minimum Vulkan alignment.  If it does then use DeviceMemoryResourceAligned instead
- *        of DeviceMemoryResource to enforce a fixed alignment on every allocation.  This can help keep arrays
- *        within suballocated DeviceMemory separated using page/block/chunk units.
- */
-template <template <typename> typename Container_t, typename Mutex_t/*=jms::NoMutex*/>
-class HostVisibleDeviceMemoryResource : public std::pmr::memory_resource {
-    using pointer_type = jms::memory::Resource<DeviceMemoryAllocation>::allocation_type::pointer_type;
-    using size_type = jms::memory::Resource<DeviceMemoryAllocation>::allocation_type::size_type;
-    static_assert(std::is_convertible_v<size_t, size_type>,
-                  "HostVisibleDeviceMemoryResource::size_type is not convertible from size_t");
-
-    struct Result {
-        DeviceMemoryResource* upstream;
-        DeviceMemoryAllocation allocation;
-        Result(DeviceMemoryResource* a, DeviceMemoryAllocation b) : upstream{a}, allocation{b} {}
-        ~Result() { if (allocation.ptr) { upstream->Deallocate(allocation); } }
-        void Reset() { allocation.ptr = nullptr; }
-    };
-    struct MappedData { DeviceMemoryAllocation allocation; void* mapped_ptr; };
-
-    DeviceMemoryResource* upstream;
-    Container_t<MappedData> allocations{};
-    Mutex_t mutex{};
-
-    void* do_allocate(size_t bytes, size_t alignment) override {
-        if (!bytes || !std::has_single_bit(alignment)) { throw std::bad_alloc{}; }
-        bytes = ((bytes / alignment) + static_cast<size_t>(bytes % alignment > 0)) * alignment;
-        auto vk_size = static_cast<size_type>(bytes);
-        Result result{upstream, upstream->Allocate(vk_size)};
-        void* ptr = nullptr;
-        if (vkMapMemory(*upstream->GetDevice(),
-                        result.allocation.ptr , result.allocation.offset, result.allocation.size,
-                        {}, &ptr) != VK_SUCCESS) {
-            // `result` should deallocate allocation upon destruction.
-            throw std::bad_alloc{};
-        }
-        std::lock_guard lock{mutex};
-        allocations.push_back({.allocation=result.allocation, .mapped_ptr=ptr});
-        result.Reset();
-        return ptr;
-    }
-
-    void do_deallocate(void* p, [[maybe_unused]] size_t bytes, [[maybe_unused]] size_t alignment) override {
-        std::lock_guard lock{mutex};
-        auto it = std::ranges::find_if(allocations, [rhs=p](void* lhs) { return lhs == rhs; }, &MappedData::mapped_ptr);
-        if (it == allocations.end()) {
-            return;
-            //throw std::runtime_error{"Unable to find allocation to destroy from mapped pointer."};
-        }
-        vkUnmapMemory(*upstream->GetDevice(), it->allocation.ptr);
-        upstream->Deallocate(it->allocation);
-        allocations.erase(it);
-    }
-
-    bool do_is_equal(const std::pmr::memory_resource& other) const noexcept override {
-        return this == std::addressof(other);
-    }
-
-public:
-    HostVisibleDeviceMemoryResource(DeviceMemoryResource& upstream) noexcept : upstream{std::addressof(upstream)} {}
-    HostVisibleDeviceMemoryResource(const HostVisibleDeviceMemoryResource&) = delete;
-    HostVisibleDeviceMemoryResource& operator=(const HostVisibleDeviceMemoryResource&) = delete;
-    ~HostVisibleDeviceMemoryResource() noexcept override { Clear(); }
-
-    void Clear() {
-        std::lock_guard lock{mutex};
-        for (MappedData& data : allocations) {
-            vkUnmapMemory(*upstream->GetDevice(), data.allocation.ptr);
-            upstream->Deallocate(data.allocation);
-        }
-        allocations.clear();
-    }
-
-    vk::raii::Buffer AsBuffer(void* p,
-                              size_t size_in_bytes,
-                              vk::BufferUsageFlags usage_flags,
-                              vk::BufferCreateFlags create_flags = {},
-                              const std::vector<uint32_t>& sharing_queue_family_indices = {}) {
-        vk::raii::Buffer buffer = upstream->GetDevice().createBuffer({
-            .flags=create_flags,
-            .size=static_cast<vk::DeviceSize>(size_in_bytes),
-            .usage=usage_flags,
-            .sharingMode=(sharing_queue_family_indices.empty() ? vk::SharingMode::eExclusive : vk::SharingMode::eConcurrent),
-            .queueFamilyIndexCount=static_cast<uint32_t>(sharing_queue_family_indices.size()),
-            .pQueueFamilyIndices=sharing_queue_family_indices.data()
-        }, upstream->GetAllocationCallbacks());
-        auto reqs = buffer.getMemoryRequirements();
-
-        std::lock_guard lock{mutex};
-        auto it = std::ranges::find_if(allocations, [rhs=p](void* lhs) { return lhs == rhs; }, &MappedData::mapped_ptr);
-        if (it == allocations.end()) { throw std::runtime_error{"Unable to find allocation to generate a buffer."}; }
-
-        // verify mapped memory can be used for this buffer or throw exception
-        if (!(1 << upstream->GetMemoryTypeIndex()) & reqs.memoryTypeBits) {
-            throw std::runtime_error{"HostVisibleDeviceMemoryResource not compatible with VkBuffer memory types."};
-        } else if (size_in_bytes != reqs.size) {
-            throw std::runtime_error{"HostVisibleDeviceMemoryResource size mismatch with VkBuffer."};
-        }
-        // alignment should always work since each allocation is direct from DeviceMemory and offset is zero.
-
-        buffer.bindMemory(it->allocation.ptr, 0);
-
-        return buffer;
-    }
-};
-
-
 template <typename ResourceAllocation_t,
           typename RAII_t,
           typename MemoryAllocation_t,
@@ -395,6 +280,186 @@ public:
     }
 };
 */
+
+
+/***
+ * This class allows for direct GPU device memory as normal system memory for things such as std::vector.  Due to
+ * the method of allocation by c++, this cannot provide suballocation of device memory.  Instead each allocation
+ * is mapped 1:1 DeviceMemory and do_allocate.  That is why I am using DeviceMemoryResource directly rather than
+ * allowing an interface to an alternate.  In order to provide suballocation, this will require pooling and other
+ * algorithms to work on top of this class such as std::pmr::monotonic_buffer_resource or jms/memory/strategies.
+ *
+ * *TODO: Use this class with different allocation strategies and resource types to determine the class should
+ *        be constructed with a minimum Vulkan alignment.  If it does then use DeviceMemoryResourceAligned instead
+ *        of DeviceMemoryResource to enforce a fixed alignment on every allocation.  This can help keep arrays
+ *        within suballocated DeviceMemory separated using page/block/chunk units.
+ */
+template <template <typename> typename Container_t, typename Mutex_t/*=jms::NoMutex*/>
+class DeviceMemoryResourceMapped : public std::pmr::memory_resource {
+    using pointer_type = jms::memory::Resource<DeviceMemoryAllocation>::allocation_type::pointer_type;
+    using size_type = jms::memory::Resource<DeviceMemoryAllocation>::allocation_type::size_type;
+    static_assert(std::is_convertible_v<size_t, size_type>,
+                  "DeviceMemoryResourceMapped::size_type is not convertible from size_t");
+
+    struct Result {
+        DeviceMemoryResource* upstream;
+        DeviceMemoryAllocation allocation;
+        Result(DeviceMemoryResource* a, DeviceMemoryAllocation b) : upstream{a}, allocation{b} {}
+        ~Result() { if (allocation.ptr) { upstream->Deallocate(allocation); } }
+        void Reset() { allocation.ptr = nullptr; }
+    };
+    struct MappedData { DeviceMemoryAllocation allocation; void* mapped_ptr; };
+
+    DeviceMemoryResource* upstream;
+    Container_t<MappedData> allocations{};
+    Mutex_t mutex{};
+
+    void* do_allocate(size_t bytes, size_t alignment) override {
+        if (!bytes || !std::has_single_bit(alignment)) { throw std::bad_alloc{}; }
+        bytes = ((bytes / alignment) + static_cast<size_t>(bytes % alignment > 0)) * alignment;
+        auto vk_size = static_cast<size_type>(bytes);
+        Result result{upstream, upstream->Allocate(vk_size)};
+        void* ptr = nullptr;
+        if (vkMapMemory(*upstream->GetDevice(),
+                        result.allocation.ptr , result.allocation.offset, result.allocation.size,
+                        {}, &ptr) != VK_SUCCESS) {
+            // `result` should deallocate allocation upon destruction.
+            throw std::bad_alloc{};
+        }
+        std::lock_guard lock{mutex};
+        allocations.push_back({.allocation=result.allocation, .mapped_ptr=ptr});
+        result.Reset();
+        return ptr;
+    }
+
+    void do_deallocate(void* p, [[maybe_unused]] size_t bytes, [[maybe_unused]] size_t alignment) override {
+        std::lock_guard lock{mutex};
+        auto it = std::ranges::find_if(allocations, [rhs=p](void* lhs) { return lhs == rhs; }, &MappedData::mapped_ptr);
+        if (it == allocations.end()) {
+            return;
+            //throw std::runtime_error{"Unable to find allocation to destroy from mapped pointer."};
+        }
+        vkUnmapMemory(*upstream->GetDevice(), it->allocation.ptr);
+        upstream->Deallocate(it->allocation);
+        allocations.erase(it);
+    }
+
+    bool do_is_equal(const std::pmr::memory_resource& other) const noexcept override {
+        return this == std::addressof(other);
+    }
+
+public:
+    DeviceMemoryResourceMapped(DeviceMemoryResource& upstream) noexcept : upstream{std::addressof(upstream)} {}
+    DeviceMemoryResourceMapped(const DeviceMemoryResourceMapped&) = delete;
+    DeviceMemoryResourceMapped& operator=(const DeviceMemoryResourceMapped&) = delete;
+    ~DeviceMemoryResourceMapped() noexcept override { Clear(); }
+
+    void Clear() {
+        std::lock_guard lock{mutex};
+        for (MappedData& data : allocations) {
+            vkUnmapMemory(*upstream->GetDevice(), data.allocation.ptr);
+            upstream->Deallocate(data.allocation);
+        }
+        allocations.clear();
+    }
+
+    vk::raii::Buffer AsBuffer(void* p,
+                              size_t size_in_bytes,
+                              vk::BufferUsageFlags usage_flags,
+                              vk::BufferCreateFlags create_flags = {},
+                              const std::vector<uint32_t>& sharing_queue_family_indices = {}) {
+        vk::raii::Buffer buffer = upstream->GetDevice().createBuffer({
+            .flags=create_flags,
+            .size=static_cast<vk::DeviceSize>(size_in_bytes),
+            .usage=usage_flags,
+            .sharingMode=(sharing_queue_family_indices.empty() ? vk::SharingMode::eExclusive : vk::SharingMode::eConcurrent),
+            .queueFamilyIndexCount=static_cast<uint32_t>(sharing_queue_family_indices.size()),
+            .pQueueFamilyIndices=sharing_queue_family_indices.data()
+        }, upstream->GetAllocationCallbacks());
+        auto reqs = buffer.getMemoryRequirements();
+
+        std::lock_guard lock{mutex};
+        auto it = std::ranges::find_if(allocations, [rhs=p](void* lhs) { return lhs == rhs; }, &MappedData::mapped_ptr);
+        if (it == allocations.end()) { throw std::runtime_error{"Unable to find allocation to generate a buffer."}; }
+
+        // verify mapped memory can be used for this buffer or throw exception
+        if (!(1 << upstream->GetMemoryTypeIndex()) & reqs.memoryTypeBits) {
+            throw std::runtime_error{"DeviceMemoryResourceMapped not compatible with VkBuffer memory types."};
+        } else if (size_in_bytes != reqs.size) {
+            throw std::runtime_error{"DeviceMemoryResourceMapped size mismatch with VkBuffer."};
+        }
+        // alignment should always work since each allocation is direct from DeviceMemory and offset is zero.
+
+        buffer.bindMemory(it->allocation.ptr, 0);
+
+        return buffer;
+    }
+};
+
+
+template <typename T>
+class UniqueMappedResource {
+public:
+    using allocator_type = std::pmr::polymorphic_allocator<>;
+    using element_type = T;
+    using pointer = T*;
+
+private:
+    allocator_type* resource{nullptr};
+    pointer ptr{nullptr};
+
+public:
+    UniqueMappedResource() noexcept = default;
+    UniqueMappedResource(allocator_type& r, pointer p)
+    : resource{std::addressof(r)}, ptr{p}
+    { if (ptr == nullptr) { throw std::runtime_error{"Invalid pointer provided to UniqueMappedResource"}; } }
+    UniqueMappedResource(allocator_type& r, auto&&... args)
+    : resource{std::addressof(r)}, ptr{r.new_object(std::forward<decltype(args)>(args)...)}
+    { if (ptr == nullptr) { throw std::bad_alloc{}; } }
+    UniqueMappedResource(const UniqueMappedResource&) = delete;
+    ~UniqueMappedResource() noexcept { if (resource && ptr) { resource->delete_object(ptr); } }
+    UniqueMappedResource& operator=(const UniqueMappedResource&) = delete;
+
+    pointer get() const noexcept { return ptr; }
+
+    allocator_type& get_allocator() const {
+        if (resource) { return *resource; }
+        throw std::runtime_error{"Attempting to dereference null UniqueMappedResource."};
+    }
+
+    typename std::add_lvalue_reference<T>::type operator*() const noexcept(noexcept(*std::declval<pointer>())) {
+        if (ptr) { return *ptr; }
+        throw std::runtime_error{"Attempting to dereference null UniqueMappedResource."};
+    }
+
+    pointer operator->() const noexcept { return ptr; }
+
+    explicit operator bool() const noexcept { return resource != nullptr && ptr != nullptr; }
+
+    pointer release() noexcept { return std::exchange(ptr, nullptr); }
+
+    void reset(allocator_type& r, pointer p) noexcept {
+        resource = std::addressof(r);
+        ptr = p;
+        if (ptr == nullptr) { throw std::runtime_error{"Invalid pointer provided to UniqueMappedResource"}; }
+    }
+
+    void reset(allocator_type& r, auto&&... args) {
+        resource = std::addressof(r);
+        ptr = resource->new_object(std::forward<decltype(args)>(args)...);
+        if (ptr == nullptr) { throw std::bad_alloc{}; }
+    }
+
+    void reset(auto&&... args) {
+        ptr = resource->new_object(std::forward<decltype(args)>(args)...);
+        if (ptr == nullptr) { throw std::bad_alloc{}; }
+    }
+
+    void swap(UniqueMappedResource& other) noexcept {
+        std::swap(resource, other.resource);
+        std::swap(ptr, other.ptr);
+    }
+};
 
 
 } // namespace vulkan

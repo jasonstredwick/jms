@@ -179,14 +179,14 @@ public:
     }
 
     template <template <typename> typename Container, typename Mutex_t>
-    HostVisibleDeviceMemoryResource<Container, Mutex_t> CreateHostVisibleDeviceMemoryResource(DeviceMemoryResource& upstream) {
+    DeviceMemoryResourceMapped<Container, Mutex_t> CreateDeviceMemoryResourceMapped(DeviceMemoryResource& upstream) {
         auto memory_type_index = upstream.GetMemoryTypeIndex();
         auto props = physical_device.getMemoryProperties();
         auto flags = props.memoryTypes[memory_type_index].propertyFlags;
-        if (!IsHostVisibleDeviceMemoryResourceCapableMemoryType(flags)) {
-            throw std::runtime_error{"CreateHostVisibleDeviceMemoryResource: invalid memory_type_index provided."};
+        if (!IsDeviceMemoryResourceMappedCapableMemoryType(flags)) {
+            throw std::runtime_error{"CreateDeviceMemoryResourceMapped: invalid memory_type_index provided."};
         }
-        return HostVisibleDeviceMemoryResource<Container, Mutex_t>{upstream};
+        return DeviceMemoryResourceMapped<Container, Mutex_t>{upstream};
     }
 
     template <typename MemoryResource_t> // template <MemoryResource_c T>
@@ -204,30 +204,22 @@ public:
         return std::numeric_limits<uint32_t>::max();
     }
 
-    uint32_t GetHostVisibleDeviceMemoryResourceCapableMemoryType(vk::MemoryPropertyFlags opt_flags = {}) {
+    uint32_t GetDeviceMemoryResourceMappedCapableMemoryType(vk::MemoryPropertyFlags opt_flags = {}) {
         auto props = physical_device.getMemoryProperties();
         for (auto i : std::views::iota(static_cast<uint32_t>(0), props.memoryTypeCount)) {
             auto flags = props.memoryTypes[i].propertyFlags;
-            if (IsHostVisibleDeviceMemoryResourceCapableMemoryType(flags) && (flags & opt_flags) == opt_flags) {
+            if (IsDeviceMemoryResourceMappedCapableMemoryType(flags) && (flags & opt_flags) == opt_flags) {
                 return i;
             }
         }
         return std::numeric_limits<uint32_t>::max();
     }
 
-    uint32_t GetIndexOrThrow(auto&& GetMemoryIndexFunc) {
-        uint32_t result = std::invoke(GetMemoryIndexFunc, this);
-        if (IsMemoryTypeIndexOutOfBounds(result)) {
-            throw std::runtime_error{"Could not find a suitable, requested memory type."};
-        }
-        return result;
-    }
-
     bool IsDeviceLocal(vk::MemoryPropertyFlags flags) noexcept {
         return static_cast<bool>(flags & vk::MemoryPropertyFlagBits::eDeviceLocal);
     }
 
-    bool IsHostVisibleDeviceMemoryResourceCapableMemoryType(vk::MemoryPropertyFlags flags) noexcept {
+    bool IsDeviceMemoryResourceMappedCapableMemoryType(vk::MemoryPropertyFlags flags) noexcept {
         return static_cast<bool>(flags & vk::MemoryPropertyFlagBits::eHostVisible) &&
                static_cast<bool>(flags & vk::MemoryPropertyFlagBits::eHostCoherent) &&
                !static_cast<bool>(flags & vk::MemoryPropertyFlagBits::eHostCached) &&

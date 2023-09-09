@@ -13,7 +13,6 @@
 #include <span>
 #include <vector>
 
-#include "jms/vulkan/allocator.hpp"
 #include "jms/vulkan/memory_resource.hpp"
 #include "jms/vulkan/vulkan.hpp"
 
@@ -109,8 +108,18 @@ constexpr const size_t Size_256KB = 262144;
 
 
 
+template <typename Allocator_t>
+class Buffer {
+    Allocator_t* allocator;
+    BufferAllocation allocation;
+    std::unique_ptr<int> x{nullptr};
 
-
+public:
+    Buffer(Allocator_t& a, BufferAllocation b) : allocator{std::addressof(a)}, allocation{b} {}
+    Buffer(const Buffer&) = delete;
+    Buffer& operator=(const Buffer&) = delete;
+    ~Buffer() noexcept { allocator->Deallocate(allocation); }
+};
 
 
 
@@ -150,6 +159,7 @@ void Sample(vk::raii::Device& device, vk::AllocationCallbacks& vac, uint32_t mem
 
 
 
+#if 0
 // let type aware allocators apply alignment
 
 // allocation strategy
@@ -305,45 +315,7 @@ allocators allocate actual memory.  Higher tier allocators get blocks of data fr
 Do you have to do anything special due to the layering?
 */
 
-
-
-
-#if 0
-  enum class DescriptorType
-  {
-    eUniformTexelBuffer       = VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER,
-    eStorageTexelBuffer       = VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER,
-    eUniformBuffer            = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-    eStorageBuffer            = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-
-    eUniformBufferDynamic     = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,
-    eStorageBufferDynamic     = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC,
-  };
-  enum class BufferUsageFlagBits : VkBufferUsageFlags
-  {
-    eTransferSrc                                = VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-    eTransferDst                                = VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-
-    eUniformTexelBuffer                         = VK_BUFFER_USAGE_UNIFORM_TEXEL_BUFFER_BIT,
-    eStorageTexelBuffer                         = VK_BUFFER_USAGE_STORAGE_TEXEL_BUFFER_BIT,
-    eUniformBuffer                              = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
-    eStorageBuffer                              = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-
-    eIndexBuffer                                = VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
-    eVertexBuffer                               = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
-    eIndirectBuffer                             = VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT,
-  };
-
-struct Uniform {
-    const vk::BufferUsageFlagBits usage{vk::BufferUsageFlagBits::eUniformBuffer};
-    const vk::DescriptorType desc_type{vk::DescriptorType::eUniformBuffer};
-};
-struct Storage {
-    const vk::BufferUsageFlagBits usage{vk::BufferUsageFlagBits::eStorageBuffer};
-    const vk::DescriptorType desc_type{vk::DescriptorType::eStorageBuffer};
-};
 #endif
-
 
 
 }
