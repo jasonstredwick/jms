@@ -188,7 +188,7 @@ public:
                    vk::BufferCreateFlags create_flags = {},
                    const std::vector<uint32_t>& sharing_queue_family_indices = {},
                    vk::AllocationCallbacks* vk_allocation_callbacks = nullptr)
-    : ResourceBase{memory_resource, device, vk_allocation_callbacks},
+    : ResourceBase<BufferAllocation, vk::raii::Buffer, MemoryAllocation_t, Container_t, Mutex_t>{memory_resource, device, vk_allocation_callbacks},
       create_flags{create_flags},
       usage_flags{usage_flags},
       sharing_mode{sharing_queue_family_indices.empty() ? vk::SharingMode::eExclusive : vk::SharingMode::eConcurrent},
