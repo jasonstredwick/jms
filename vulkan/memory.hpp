@@ -154,18 +154,22 @@ class MemoryHelper {
     size_t min_storage_alignment;
 
 public:
-    MemoryHelper(const vk::raii::PhysicalDevice& physical_device, vk::raii::Device& device, vk::AllocationCallbacks& vk_allocation_callbacks)
-    : physical_device{physical_device}, device{std::addressof(device)}, vk_allocation_callbacks{std::addressof(vk_allocation_callbacks)}
+    MemoryHelper(const vk::raii::PhysicalDevice& physical_device,
+                 vk::raii::Device& device,
+                 vk::AllocationCallbacks* vk_allocation_callbacks=nullptr)
+    : physical_device{physical_device},
+      device{std::addressof(device)},
+      vk_allocation_callbacks{vk_allocation_callbacks}
     { Init(); }
 
     DeviceMemoryResource CreateDirectMemoryResource(uint32_t memory_type_index) {
         // validate requested index ... { throw std::runtime_error{"CreateDirectMemoryResource requires valid memory_type_index."}; }
-        return {*device, *vk_allocation_callbacks, memory_type_index};
+        return {*device, memory_type_index, vk_allocation_callbacks};
     }
 
     DeviceMemoryResourceAligned CreateDirectMemoryResource(uint32_t memory_type_index, vk::DeviceSize alignment) {
         // validate requested index ... { throw std::runtime_error{"CreateDirectMemoryResource requires valid memory_type_index."}; }
-        return {*device, *vk_allocation_callbacks, memory_type_index, alignment};
+        return {*device, memory_type_index, alignment, vk_allocation_callbacks};
     }
 
     DeviceMemoryResource CreateDirectMemoryResource(AccessDirection access_direction) {
@@ -175,7 +179,7 @@ public:
         else if (access_direction == AccessDirection::HOST_READ_WRITE) { index = optimal_read_write_memory_type_index; }
         else if (access_direction == AccessDirection::HOST_WRITE)      { index = optimal_write_memory_type_index; }
         else { throw std::runtime_error{"Creating a DirectMemoryResource requires valid AccessDirection."}; }
-        return {*device, *vk_allocation_callbacks, index};
+        return {*device, index, vk_allocation_callbacks};
     }
 
     template <template <typename> typename Container, typename Mutex_t>
@@ -222,7 +226,7 @@ public:
     bool IsDeviceMemoryResourceMappedCapableMemoryType(vk::MemoryPropertyFlags flags) noexcept {
         return static_cast<bool>(flags & vk::MemoryPropertyFlagBits::eHostVisible) &&
                static_cast<bool>(flags & vk::MemoryPropertyFlagBits::eHostCoherent) &&
-               !static_cast<bool>(flags & vk::MemoryPropertyFlagBits::eHostCached) &&
+               //!static_cast<bool>(flags & vk::MemoryPropertyFlagBits::eHostCached) &&
                !static_cast<bool>(flags & vk::MemoryPropertyFlagBits::eLazilyAllocated);
     }
 

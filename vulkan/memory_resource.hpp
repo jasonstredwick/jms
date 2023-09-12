@@ -39,10 +39,10 @@ class DeviceMemoryResource : public jms::memory::Resource<DeviceMemoryAllocation
 
 public:
     DeviceMemoryResource(vk::raii::Device& device,
-                         vk::AllocationCallbacks& vk_allocation_callbacks,
-                         uint32_t memory_type_index) noexcept
+                         uint32_t memory_type_index,
+                         vk::AllocationCallbacks* vk_allocation_callbacks = nullptr) noexcept
     : device{std::addressof(device)},
-      vk_allocation_callbacks{std::addressof(vk_allocation_callbacks)},
+      vk_allocation_callbacks{vk_allocation_callbacks},
       memory_type_index{memory_type_index}
     {}
     ~DeviceMemoryResource() noexcept override = default;
@@ -52,13 +52,13 @@ public:
         vk::raii::DeviceMemory dev_mem = device->allocateMemory({
             .allocationSize=size,
             .memoryTypeIndex=memory_type_index
-        }, *vk_allocation_callbacks);
+        }, vk_allocation_callbacks);
         return {.ptr=static_cast<pointer_type>(dev_mem.release()), .offset=0, .size=size};
     }
 
     void Deallocate(DeviceMemoryAllocation allocation) override {
         // delete upon leaving scope
-        vk::raii::DeviceMemory dev_mem{*device, allocation.ptr, *vk_allocation_callbacks};
+        vk::raii::DeviceMemory dev_mem{*device, allocation.ptr, vk_allocation_callbacks};
     }
 
     bool IsEqual(const jms::memory::Resource<DeviceMemoryAllocation>& other) const noexcept override {
@@ -69,7 +69,7 @@ public:
     }
 
     vk::raii::Device& GetDevice() const noexcept { return *device; }
-    vk::AllocationCallbacks& GetAllocationCallbacks() const noexcept { return *vk_allocation_callbacks; }
+    vk::AllocationCallbacks* GetAllocationCallbacks() const noexcept { return vk_allocation_callbacks; }
     uint32_t GetMemoryTypeIndex() const noexcept { return memory_type_index; }
 };
 
@@ -82,10 +82,10 @@ class DeviceMemoryResourceAligned : public DeviceMemoryResource {
 
 public:
     DeviceMemoryResourceAligned(vk::raii::Device& device,
-                                vk::AllocationCallbacks& vk_allocation_callbacks,
                                 uint32_t memory_type_index,
-                                size_type alignment) noexcept
-    : DeviceMemoryResource{device, vk_allocation_callbacks, memory_type_index},
+                                size_type alignment,
+                                vk::AllocationCallbacks* vk_allocation_callbacks = nullptr) noexcept
+    : DeviceMemoryResource{device, memory_type_index, vk_allocation_callbacks},
       alignment{alignment}
     {}
     DeviceMemoryResourceAligned(const DeviceMemoryResourceAligned&) = delete;
@@ -135,7 +135,7 @@ protected:
     }
 
     void DestroyUnit(Unit& unit) {
-        RAII_t resource{*device, unit.res_ptr, *vk_allocation_callbacks};
+        RAII_t resource{*device, unit.res_ptr, vk_allocation_callbacks};
         resource.clear();
         memory_resource->Deallocate(unit.mem);
     }
@@ -161,10 +161,10 @@ protected:
 public:
     ResourceBase(jms::memory::Resource<MemoryAllocation_t>& memory_resource,
                  vk::raii::Device& device,
-                 vk::AllocationCallbacks& vk_allocation_callbacks)
+                 vk::AllocationCallbacks* vk_allocation_callbacks)
     : memory_resource{std::addressof(memory_resource)},
       device{std::addressof(device)},
-      vk_allocation_callbacks{std::addressof(vk_allocation_callbacks)}
+      vk_allocation_callbacks{vk_allocation_callbacks}
     {}
     ResourceBase(const ResourceBase&) = delete;
     ResourceBase& operator=(const ResourceBase&) = delete;
@@ -184,10 +184,10 @@ class BufferResource : public ResourceBase<BufferAllocation, vk::raii::Buffer, M
 public:
     BufferResource(jms::memory::Resource<MemoryAllocation_t>& memory_resource,
                    vk::raii::Device& device,
-                   vk::AllocationCallbacks& vk_allocation_callbacks,
                    vk::BufferUsageFlags usage_flags,
                    vk::BufferCreateFlags create_flags = {},
-                   const std::vector<uint32_t>& sharing_queue_family_indices = {})
+                   const std::vector<uint32_t>& sharing_queue_family_indices = {},
+                   vk::AllocationCallbacks* vk_allocation_callbacks = nullptr)
     : ResourceBase{memory_resource, device, vk_allocation_callbacks},
       create_flags{create_flags},
       usage_flags{usage_flags},
@@ -207,7 +207,7 @@ public:
             .sharingMode=sharing_mode,
             .queueFamilyIndexCount=static_cast<uint32_t>(sharing_queue_family_indices.size()),
             .pQueueFamilyIndices=sharing_queue_family_indices.data()
-        }, *this->vk_allocation_callbacks));
+        }, this->vk_allocation_callbacks));
     }
 
     void Deallocate(BufferAllocation allocation) override { this->DoDeallocate(allocation); }
@@ -238,10 +238,10 @@ class ImageResource : public ResourceBase<ImageAllocation, vk::raii::Image, Memo
 public:
     ImageResource(jms::memory::Resource<MemoryAllocation_t>& memory_resource,
                   vk::raii::Device& device,
-                  vk::AllocationCallbacks& vk_allocation_callbacks,
                   vk::BufferUsageFlags usage_flags,
                   vk::BufferCreateFlags create_flags = {},
-                  const std::vector<uint32_t>& sharing_queue_family_indices = {})
+                  const std::vector<uint32_t>& sharing_queue_family_indices = {},
+                  vk::AllocationCallbacks* vk_allocation_callbacks = nullptr)
     : ResourceBase{memory_resource, device, vk_allocation_callbacks},
       create_flags{create_flags},
       usage_flags{usage_flags},
@@ -263,7 +263,7 @@ public:
             .queueFamilyIndexCount=static_cast<uint32_t>(sharing_queue_family_indices.size()),
             .pQueueFamilyIndices=sharing_queue_family_indices.data()
 #endif
-        }, *vk_allocation_callbacks));
+        }, vk_allocation_callbacks));
     }
 
     void Deallocate(ImageAllocation allocation) override { DoDeallocate(allocation); }
