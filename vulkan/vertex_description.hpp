@@ -20,6 +20,13 @@ concept Vertex_c = requires(T, uint32_t binding) {
 };
 
 
+template <typename T>
+concept Vertex2EXT_c = requires(T, uint32_t binding) {
+  { T::GetBindingDesc(binding) } -> std::convertible_to<std::vector<vk::VertexInputBindingDescription2EXT>>;
+  { T::GetAttributeDesc(binding) } -> std::convertible_to<std::vector<vk::VertexInputAttributeDescription2EXT>>;
+};
+
+
 struct VertexDescription {
     std::vector<vk::VertexInputBindingDescription> binding_description{};
     std::vector<vk::VertexInputAttributeDescription> attribute_description{};
@@ -30,12 +37,23 @@ struct VertexDescription {
     }
 
     constexpr vk::PipelineVertexInputStateCreateInfo GetInfo() const {
-        return vk::PipelineVertexInputStateCreateInfo{
+        return vk::PipelineVertexInputStateCreateInfo {
             .vertexBindingDescriptionCount=static_cast<uint32_t>(binding_description.size()),
             .pVertexBindingDescriptions=binding_description.data(),
             .vertexAttributeDescriptionCount=static_cast<uint32_t>(attribute_description.size()),
             .pVertexAttributeDescriptions=attribute_description.data()
         };
+    }
+};
+
+
+struct VertexDescription2EXT {
+    std::vector<vk::VertexInputBindingDescription2EXT> binding_description{};
+    std::vector<vk::VertexInputAttributeDescription2EXT> attribute_description{};
+
+    template <Vertex2EXT_c T>
+    static constexpr VertexDescription2EXT Create(uint32_t binding) {
+        return {.binding_description=T::GetBindingDesc(binding), .attribute_description=T::GetAttributeDesc(binding)};
     }
 };
 

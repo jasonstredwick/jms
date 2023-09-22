@@ -10,6 +10,7 @@
 #include <set>
 #include <string>
 #include <string_view>
+#include <variant>
 #include <vector>
 
 #include "jms/vulkan/vulkan.hpp"
@@ -17,6 +18,8 @@
 #include "jms/vulkan/memory.hpp"
 #include "jms/vulkan/render_info.hpp"
 #include "jms/vulkan/shader.hpp"
+#include "jms/vulkan/types.hpp"
+#include "jms/vulkan/utils.hpp"
 #include "jms/vulkan/vertex_description.hpp"
 
 
@@ -41,6 +44,7 @@ struct alignas(16) DeviceConfig {
     std::vector<std::string> extension_names{};
     vk::PhysicalDeviceFeatures features{};
     std::vector<vk::DeviceQueueCreateInfo> queue_infos{};
+    std::vector<DeviceCreateInfo2Variant> pnext_features{};
 };
 
 
@@ -74,6 +78,7 @@ struct State {
     std::vector<vk::raii::DeviceMemory> device_memory{};
     std::vector<vk::raii::DescriptorPool> descriptor_pools{};
     std::vector<vk::raii::DescriptorSet> descriptor_sets{};
+    std::vector<vk::raii::ShaderModule> shader_modules{};
     std::vector<void*> mapped_buffers{};
 
     State() = default;
@@ -85,7 +90,7 @@ struct State {
 
     vk::raii::PhysicalDevice& PhysicalDevice(size_t index) { return physical_devices.at(index); }
 
-    void InitDevice(const vk::raii::PhysicalDevice& physical_device, DeviceConfig&& cfg);
+    vk::raii::Device& InitDevice(const vk::raii::PhysicalDevice& physical_device, DeviceConfig&& cfg, vk::AllocationCallbacks* vk_allocation_callbacks = nullptr);
     void InitInstance(InstanceConfig&& cfg);
     void InitPipeline(const vk::raii::Device& device, const vk::raii::RenderPass& render_pass, const vk::Extent2D target_extent, const VertexDescription& vertex_desc, const std::vector<vk::DescriptorSetLayoutBinding>& layout_bindings, const std::vector<jms::vulkan::shader::Info>& shaders);
     void InitQueues(const vk::raii::Device& device, const uint32_t queue_family_index);
@@ -94,16 +99,30 @@ struct State {
 };
 
 
-void State::InitDevice(const vk::raii::PhysicalDevice& physical_device, DeviceConfig&& cfg) {
-    device_config = cfg;
+vk::raii::Device& State::InitDevice(const vk::raii::PhysicalDevice& physical_device,
+                                    DeviceConfig&& cfg,
+                                    vk::AllocationCallbacks* vk_allocation_callbacks) {
+    device_config = std::move(cfg);
 
     auto StrToCharP = [](std::string& i) { return i.c_str(); };
     std::vector<const char*> layers_name_vec{};
     std::ranges::transform(device_config.layer_names, std::back_inserter(layers_name_vec), StrToCharP);
     std::vector<const char*> extensions_name_vec{};
     std::ranges::transform(device_config.extension_names, std::back_inserter(extensions_name_vec), StrToCharP);
+    std::vector<DeviceCreateInfo2Variant> pnext_copy = ChainPNext(device_config.pnext_features);
 
-    devices.push_back(vk::raii::Device{physical_device, {
+    const void* pnext = nullptr;
+    const vk::PhysicalDeviceFeatures* features = &device_config.features;
+    vk::PhysicalDeviceFeatures2 features2{};
+    if (pnext_copy.size()) {
+        features2.pNext = &pnext_copy[0];
+        features2.features=device_config.features;
+        features = nullptr;
+        pnext = static_cast<const void*>(&features2);
+    }
+
+    return devices.emplace_back(physical_device, vk::DeviceCreateInfo{
+        .pNext=pnext,
         .queueCreateInfoCount=static_cast<uint32_t>(device_config.queue_infos.size()),
         .pQueueCreateInfos=device_config.queue_infos.data(),
         .enabledLayerCount=static_cast<uint32_t>(layers_name_vec.size()),
@@ -111,12 +130,12 @@ void State::InitDevice(const vk::raii::PhysicalDevice& physical_device, DeviceCo
         .enabledExtensionCount=static_cast<uint32_t>(extensions_name_vec.size()),
         .ppEnabledExtensionNames=extensions_name_vec.data(),
         .pEnabledFeatures=&device_config.features
-    }});
+    }, vk_allocation_callbacks);
 }
 
 
 void State::InitInstance(InstanceConfig&& cfg) {
-    instance_config = cfg;
+    instance_config = std::move(cfg);
 
     vk::ApplicationInfo application_info{
         .pApplicationName=instance_config.app_name.c_str(),
@@ -177,6 +196,14 @@ void State::InitInstance(InstanceConfig&& cfg) {
 }
 
 
+struct RenderingState {
+    vk::ClearValue clear_value{.color={std::array<float, 4>{0.0f, 0.0f, 0.0f, 0.0f}}};
+
+    vk::Extent2D target_extent;
+    vk::raii::ImageView& target_view;
+};
+
+
 void State::InitPipeline(const vk::raii::Device& device,
                          const vk::raii::RenderPass& render_pass,
                          const vk::Extent2D target_extent,
@@ -184,9 +211,18 @@ void State::InitPipeline(const vk::raii::Device& device,
                          const std::vector<vk::DescriptorSetLayoutBinding>& layout_bindings,
                          const std::vector<jms::vulkan::shader::Info>& shaders) {
     std::vector<vk::PipelineShaderStageCreateInfo> shader_stages{};
-    std::ranges::transform(shaders, std::back_inserter(shader_stages), [](const jms::vulkan::shader::Info& info) {
-        return info.ToCreateInfo();
-    });
+    shader_stages.reserve(shaders.size());
+    for (const auto& shader_info : shaders) {
+        vk::raii::ShaderModule& module = shader_modules.emplace_back(device, vk::ShaderModuleCreateInfo{
+            .codeSize=(shader_info.code.size() * sizeof(decltype(shader_info.code)::value_type)),
+            .pCode=shader_info.code.data()
+        });
+        shader_stages.push_back(vk::PipelineShaderStageCreateInfo{
+            .stage=shader_info.stage,
+            .module=*module,
+            .pName=shader_info.entry_point_name.c_str()
+        });
+    }
 
     vk::PipelineInputAssemblyStateCreateInfo input_assembly_info{
         .topology=vk::PrimitiveTopology::eTriangleList,

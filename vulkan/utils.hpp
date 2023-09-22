@@ -1,14 +1,42 @@
 #pragma once
 
 
+#include <algorithm>
 #include <cassert>
+#include <ranges>
+#include <set>
+#include <stdexcept>
+#include <tuple>
 #include <type_traits>
+#include <variant>
+#include <vector>
 
 #include "jms/vulkan/vulkan.hpp"
 
 
 namespace jms {
 namespace vulkan {
+
+
+template <typename... Ts>
+auto ChainPNext(std::vector<std::variant<Ts...>> v) {
+    using Tuple_t = std::tuple<std::variant<Ts...>&, std::variant<Ts...>&>;
+
+    // Validate
+    std::set<vk::StructureType> kinds{};
+    std::ranges::transform(v, std::inserter(kinds, kinds.begin()), [](auto& i) {
+        return std::visit([](auto&& x) { return x.sType; }, i); });
+    if (kinds.size() != v.size()) {
+        throw std::runtime_error{"DeviceCreateInfo does not allow duplicate pNext structures."};
+    }
+
+    std::ranges::for_each(
+        std::views::zip(v, v | std::views::drop(1)), [](Tuple_t&& tup) {
+            void* ptr = &(std::get<1>(tup));
+            std::visit([&ptr](auto&& x) { x.pNext = ptr; }, std::get<0>(tup));
+        });
+    return v;
+}
 
 
 template <typename T>
@@ -41,6 +69,7 @@ vk::StructureType ExtractSType(void* next_ptr) {
         }
     }
 */
+
 
 }
 }
