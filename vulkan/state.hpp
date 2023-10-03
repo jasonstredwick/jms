@@ -43,72 +43,79 @@ struct alignas(16) DeviceConfig {
     std::vector<std::string> layer_names{};
     std::vector<std::string> extension_names{};
     vk::PhysicalDeviceFeatures features{};
+    uint32_t queue_family_index{};
+    std::vector<float> queue_priority{};
     std::vector<vk::DeviceQueueCreateInfo> queue_infos{};
     std::vector<DeviceCreateInfo2Variant> pnext_features{};
 };
 
 
 struct State {
-    InstanceConfig instance_config{};
-    DeviceConfig device_config{};
+    // Order matters; i.e. order of destruction
     vk::raii::Context context{};
+    InstanceConfig instance_config{};
     vk::raii::Instance instance{nullptr};
     vk::raii::DebugUtilsMessengerEXT debug_messenger{nullptr};
-    vk::raii::SurfaceKHR surface{nullptr};
     vk::raii::PhysicalDevices physical_devices{nullptr};
-    jms::vulkan::RenderInfo render_info{};
+    std::vector<DeviceConfig> device_configs{};
     std::vector<vk::raii::Device> devices{};
-    std::vector<vk::raii::RenderPass> render_passes{};
-    std::vector<vk::Viewport> viewports{};
-    std::vector<vk::Rect2D> scissors{};
+    vk::raii::Queue graphics_queue{nullptr};
+    vk::raii::Queue present_queue{nullptr};
+    std::vector<vk::raii::CommandPool> command_pools{};
+    std::vector<std::vector<vk::raii::CommandBuffer>> command_buffers{};
+    std::vector<vk::raii::DescriptorPool> descriptor_pools{};
+    std::vector<vk::raii::DescriptorSet> descriptor_sets{};
+
+    vk::raii::SurfaceKHR surface{nullptr};
+    vk::raii::SwapchainKHR swapchain{nullptr};
+    std::vector<vk::raii::Framebuffer> swapchain_framebuffers{};
+    std::vector<vk::raii::ImageView> swapchain_image_views{};
+
+
+
+
     std::vector<vk::raii::DescriptorSetLayout> descriptor_set_layouts{};
     std::vector<vk::raii::PipelineLayout> pipeline_layouts{};
     std::vector<vk::raii::Pipeline> pipelines{};
-    vk::raii::Queue graphics_queue{nullptr};
-    vk::raii::Queue present_queue{nullptr};
     std::vector<vk::raii::Semaphore> semaphores{};
     std::vector<vk::raii::Fence> fences{};
-    std::vector<vk::raii::CommandPool> command_pools{};
-    std::vector<vk::raii::CommandBuffers> command_buffers{};
-    vk::raii::SwapchainKHR swapchain{nullptr};
-    std::vector<vk::raii::ImageView> swapchain_image_views{};
-    std::vector<vk::raii::Framebuffer> swapchain_framebuffers{};
+
     std::vector<vk::raii::Buffer> buffers{};
-    std::vector<vk::MemoryRequirements> buffers_mem_reqs{};
-    std::vector<vk::raii::DeviceMemory> device_memory{};
-    std::vector<vk::raii::DescriptorPool> descriptor_pools{};
-    std::vector<vk::raii::DescriptorSet> descriptor_sets{};
     std::vector<vk::raii::ShaderModule> shader_modules{};
-    std::vector<void*> mapped_buffers{};
 
     State() = default;
     State(const State&) = delete;
     State(State&&) = default;
-    ~State() = default;
     State& operator=(const State&) = delete;
     State& operator=(State&&) = default;
 
     vk::raii::PhysicalDevice& PhysicalDevice(size_t index) { return physical_devices.at(index); }
 
-    vk::raii::Device& InitDevice(const vk::raii::PhysicalDevice& physical_device, DeviceConfig&& cfg, vk::AllocationCallbacks* vk_allocation_callbacks = nullptr);
-    void InitInstance(InstanceConfig&& cfg);
-    void InitPipeline(const vk::raii::Device& device, const vk::raii::RenderPass& render_pass, const vk::Extent2D target_extent, const VertexDescription& vertex_desc, const std::vector<vk::DescriptorSetLayoutBinding>& layout_bindings, const std::vector<jms::vulkan::shader::Info>& shaders);
-    void InitQueues(const vk::raii::Device& device, const uint32_t queue_family_index);
-    void InitRenderPass(const vk::raii::Device& device, const vk::Format pixel_format, const vk::Extent2D target_extent);
-    void InitSwapchain(const vk::raii::Device& device, const jms::vulkan::RenderInfo& render_info, const vk::raii::SurfaceKHR& surface, const vk::raii::RenderPass& render_pass);
+    vk::raii::Device& InitDevice(vk::raii::PhysicalDevice& physical_device,
+                                 DeviceConfig&& cfg,
+                                 std::optional<vk::AllocationCallbacks*> vk_allocation_callbacks = std::nullopt);
+    void InitInstance(InstanceConfig&& cfg,
+                      std::optional<vk::AllocationCallbacks*> vk_allocation_callbacks = std::nullopt);
+    void InitQueues(size_t device_index,
+                    std::optional<vk::AllocationCallbacks*> vk_allocation_callbacks = std::nullopt);
+    void InitSwapchain(vk::raii::Device& device,
+                       vk::raii::SurfaceKHR& surface,
+                       const jms::vulkan::RenderInfo& render_info,
+                       std::optional<vk::RenderPass> render_pass = std::nullopt,
+                       std::optional<vk::AllocationCallbacks*> vk_allocation_callbacks = std::nullopt);
 };
 
 
-vk::raii::Device& State::InitDevice(const vk::raii::PhysicalDevice& physical_device,
+vk::raii::Device& State::InitDevice(vk::raii::PhysicalDevice& physical_device,
                                     DeviceConfig&& cfg,
-                                    vk::AllocationCallbacks* vk_allocation_callbacks) {
-    device_config = std::move(cfg);
+                                    std::optional<vk::AllocationCallbacks*> vk_allocation_callbacks) {
+    DeviceConfig& device_config = device_configs.emplace_back(std::move(cfg));
 
-    auto StrToCharP = [](std::string& i) { return i.c_str(); };
-    std::vector<const char*> layers_name_vec{};
-    std::ranges::transform(device_config.layer_names, std::back_inserter(layers_name_vec), StrToCharP);
-    std::vector<const char*> extensions_name_vec{};
-    std::ranges::transform(device_config.extension_names, std::back_inserter(extensions_name_vec), StrToCharP);
+    auto TransFn = [](auto& i) { return i.c_str(); };
+    std::vector<const char*> vk_layers_name{};
+    std::ranges::transform(device_config.layer_names, std::back_inserter(vk_layers_name), TransFn);
+    std::vector<const char*> vk_extensions_name{};
+    std::ranges::transform(device_config.extension_names, std::back_inserter(vk_extensions_name), TransFn);
     std::vector<DeviceCreateInfo2Variant> pnext_copy = ChainPNext(device_config.pnext_features);
 
     const void* pnext = nullptr;
@@ -121,20 +128,29 @@ vk::raii::Device& State::InitDevice(const vk::raii::PhysicalDevice& physical_dev
         pnext = static_cast<const void*>(&features2);
     }
 
+    device_config.queue_infos = std::vector<vk::DeviceQueueCreateInfo>{
+        // graphics queue + presentation queue
+        {
+            .queueFamilyIndex=device_config.queue_family_index,
+            .queueCount=static_cast<uint32_t>(device_config.queue_priority.size()),
+            .pQueuePriorities=device_config.queue_priority.data()
+        }
+    };
+
     return devices.emplace_back(physical_device, vk::DeviceCreateInfo{
         .pNext=pnext,
         .queueCreateInfoCount=static_cast<uint32_t>(device_config.queue_infos.size()),
         .pQueueCreateInfos=device_config.queue_infos.data(),
-        .enabledLayerCount=static_cast<uint32_t>(layers_name_vec.size()),
-        .ppEnabledLayerNames=layers_name_vec.data(),
-        .enabledExtensionCount=static_cast<uint32_t>(extensions_name_vec.size()),
-        .ppEnabledExtensionNames=extensions_name_vec.data(),
-        .pEnabledFeatures=&device_config.features
-    }, vk_allocation_callbacks);
+        .enabledLayerCount=static_cast<uint32_t>(vk_layers_name.size()),
+        .ppEnabledLayerNames=vk_layers_name.data(),
+        .enabledExtensionCount=static_cast<uint32_t>(vk_extensions_name.size()),
+        .ppEnabledExtensionNames=vk_extensions_name.data(),
+        .pEnabledFeatures=features
+    }, vk_allocation_callbacks.value_or(nullptr));
 }
 
 
-void State::InitInstance(InstanceConfig&& cfg) {
+void State::InitInstance(InstanceConfig&& cfg, std::optional<vk::AllocationCallbacks*> vk_allocation_callbacks) {
     instance_config = std::move(cfg);
 
     vk::ApplicationInfo application_info{
@@ -145,275 +161,84 @@ void State::InitInstance(InstanceConfig&& cfg) {
         .apiVersion=(instance_config.api_version) ? instance_config.api_version : context.enumerateInstanceVersion()
     };
 
-    std::vector<vk::LayerProperties> layer_props = context.enumerateInstanceLayerProperties();
-    std::set<std::string> layer_names{};
-    std::ranges::transform(layer_props, std::inserter(layer_names, layer_names.begin()),
-                            [](auto& i) -> std::string { return i.layerName; });
-    std::set<std::string> requested_layer_names{instance_config.layer_names.begin(), instance_config.layer_names.end()};
-    if (instance_config.debug.has_value()) { requested_layer_names.insert(std::string{"VK_LAYER_KHRONOS_validation"}); }
-    for (auto& i : requested_layer_names) {
-        if (!layer_names.contains(i)) {
+    // dedup and check requested layer is available
+    std::set<std::string> layer_names_available{};
+    std::ranges::transform(context.enumerateInstanceLayerProperties(),
+                           std::inserter(layer_names_available, layer_names_available.begin()),
+                           [](auto& i) -> std::string { return i.layerName; });
+    std::set<std::string> layer_names{instance_config.layer_names.begin(), instance_config.layer_names.end()};
+    if (instance_config.debug.has_value()) { layer_names.insert(std::string{"VK_LAYER_KHRONOS_validation"}); }
+    for (auto& i : layer_names) {
+        if (!layer_names_available.contains(i)) {
             throw std::runtime_error(std::format("Requested layer \"{}\" not available.", i));
         }
     }
 
-    std::vector<vk::ExtensionProperties> extension_props = context.enumerateInstanceExtensionProperties();
-    std::set<std::string> extension_names{};
-    std::ranges::transform(extension_props, std::inserter(extension_names, extension_names.begin()),
-                            [](auto& i) -> std::string { return i.extensionName; });
-    for (auto& i : instance_config.extension_names) {
-        if (!extension_names.contains(i)) {
+    // dedup and check requested extension is available
+    std::set<std::string> extension_names_available{};
+    std::ranges::transform(context.enumerateInstanceExtensionProperties(),
+                           std::inserter(extension_names_available, extension_names_available.begin()),
+                           [](auto& i) -> std::string { return i.extensionName; });
+    std::set<std::string> extension_names{instance_config.extension_names.begin(),
+                                          instance_config.extension_names.end()};
+    for (auto& i : extension_names) {
+        if (!extension_names_available.contains(i)) {
             throw std::runtime_error(std::format("Requested instance extension \"{}\" not available.", i));
         }
     }
 
     auto TransFn = [](auto& i) { return i.c_str(); };
-    std::vector<const char*> layer_names_vec{};
-    std::ranges::transform(requested_layer_names, std::back_insert_iterator(layer_names_vec), TransFn);
-    std::vector<const char*> ext_names_vec{};
-    std::ranges::transform(instance_config.extension_names, std::back_insert_iterator(ext_names_vec), TransFn);
+    std::vector<const char*> vk_layer_names{};
+    std::ranges::transform(layer_names, std::back_inserter(vk_layer_names), TransFn);
+    std::vector<const char*> vk_extension_names{};
+    std::ranges::transform(extension_names, std::back_inserter(vk_extension_names), TransFn);
 
-    instance = vk::raii::Instance{context, vk::InstanceCreateInfo{
+    instance = context.createInstance(vk::InstanceCreateInfo{
         .flags=vk::InstanceCreateFlags(),
         .pApplicationInfo=&application_info,
-        .enabledLayerCount=static_cast<uint32_t>(layer_names_vec.size()),
-        .ppEnabledLayerNames=layer_names_vec.data(),
-        .enabledExtensionCount=static_cast<uint32_t>(ext_names_vec.size()),
-        .ppEnabledExtensionNames=ext_names_vec.data()
-    }};
+        .enabledLayerCount=static_cast<uint32_t>(vk_layer_names.size()),
+        .ppEnabledLayerNames=vk_layer_names.data(),
+        .enabledExtensionCount=static_cast<uint32_t>(vk_extension_names.size()),
+        .ppEnabledExtensionNames=vk_extension_names.data()
+    }, vk_allocation_callbacks.value_or(nullptr));
 
     if (instance_config.debug.has_value()) {
-        vk::DebugUtilsMessengerCreateInfoEXT debug_messenger_create_info{
-            .flags=vk::DebugUtilsMessengerCreateFlagsEXT(),
-            .messageSeverity=instance_config.debug.value().severity_flags,
-            .messageType=instance_config.debug.value().msg_type_flags,
-            .pfnUserCallback=instance_config.debug.value().debug_fn
+        debug_messenger = vk::raii::DebugUtilsMessengerEXT{
+            instance,
+            vk::DebugUtilsMessengerCreateInfoEXT{
+                .flags=vk::DebugUtilsMessengerCreateFlagsEXT(),
+                .messageSeverity=instance_config.debug.value().severity_flags,
+                .messageType=instance_config.debug.value().msg_type_flags,
+                .pfnUserCallback=instance_config.debug.value().debug_fn
+            },
+            vk_allocation_callbacks.value_or(nullptr)
         };
-        debug_messenger = vk::raii::DebugUtilsMessengerEXT{instance, debug_messenger_create_info};
     }
 
     physical_devices = vk::raii::PhysicalDevices{instance};
 }
 
 
-struct RenderingState {
-    vk::ClearValue clear_value{.color={std::array<float, 4>{0.0f, 0.0f, 0.0f, 0.0f}}};
+void State::InitQueues(size_t device_index, std::optional<vk::AllocationCallbacks*> vk_allocation_callbacks) {
+    vk::raii::Device& device = devices.at(device_index);
+    uint32_t queue_family_index = device_configs.at(device_index).queue_family_index;
 
-    vk::Extent2D target_extent;
-    vk::raii::ImageView& target_view;
-};
-
-
-void State::InitPipeline(const vk::raii::Device& device,
-                         const vk::raii::RenderPass& render_pass,
-                         const vk::Extent2D target_extent,
-                         const VertexDescription& vertex_desc,
-                         const std::vector<vk::DescriptorSetLayoutBinding>& layout_bindings,
-                         const std::vector<jms::vulkan::shader::Info>& shaders) {
-    std::vector<vk::PipelineShaderStageCreateInfo> shader_stages{};
-    shader_stages.reserve(shaders.size());
-    for (const auto& shader_info : shaders) {
-        vk::raii::ShaderModule& module = shader_modules.emplace_back(device, vk::ShaderModuleCreateInfo{
-            .codeSize=(shader_info.code.size() * sizeof(decltype(shader_info.code)::value_type)),
-            .pCode=shader_info.code.data()
-        });
-        shader_stages.push_back(vk::PipelineShaderStageCreateInfo{
-            .stage=shader_info.stage,
-            .module=*module,
-            .pName=shader_info.entry_point_name.c_str()
-        });
-    }
-
-    vk::PipelineInputAssemblyStateCreateInfo input_assembly_info{
-        .topology=vk::PrimitiveTopology::eTriangleList,
-        .primitiveRestartEnable=VK_FALSE
-    };
-
-    std::vector<vk::DynamicState> dynamic_states = {vk::DynamicState::eViewport, vk::DynamicState::eScissor};
-
-    vk::PipelineDynamicStateCreateInfo dynamic_state_info{
-        .dynamicStateCount=static_cast<uint32_t>(dynamic_states.size()),
-        .pDynamicStates=dynamic_states.data()
-    };
-
-    // *********************************************************
-    // Default viewport and scissor; stored in state for use when drawing with dynamic viewport/scissor
-    viewports.push_back(vk::Viewport{
-        .x=0.0f,
-        .y=0.0f,
-        .width=static_cast<float>(target_extent.width),
-        .height=static_cast<float>(target_extent.height),
-        .minDepth=0.0f,
-        .maxDepth=1.0f
-    });
-
-    scissors.push_back(vk::Rect2D{
-        .offset={0, 0},
-        .extent=target_extent
-    });
-    // *********************************************************
-
-    vk::PipelineViewportStateCreateInfo viewport_info{
-        .viewportCount=1,
-        .scissorCount=1,
-    };
-    // *********************************************************
-
-    vk::PipelineRasterizationStateCreateInfo rasterizer_info{
-        .depthClampEnable=VK_FALSE,
-        .rasterizerDiscardEnable=VK_FALSE,
-        .polygonMode=vk::PolygonMode::eFill,
-        .cullMode=vk::CullModeFlagBits::eBack,
-        .frontFace=vk::FrontFace::eCounterClockwise, //vk::FrontFace::eClockwise,   ---- review
-        .depthBiasEnable=VK_FALSE,
-        .depthBiasConstantFactor=0.0f,
-        .depthBiasClamp=0.0f,
-        .depthBiasSlopeFactor=0.0f,
-        .lineWidth=1.0f
-    };
-
-    vk::PipelineMultisampleStateCreateInfo multisampling_info{
-        .rasterizationSamples=vk::SampleCountFlagBits::e1,
-        .sampleShadingEnable=VK_FALSE,
-        .minSampleShading=1.0f,
-        .pSampleMask=nullptr,
-        .alphaToCoverageEnable=VK_FALSE,
-        .alphaToOneEnable=VK_FALSE
-    };
-
-    vk::PipelineColorBlendAttachmentState color_blend_attachment{
-        .blendEnable=VK_FALSE,
-        .srcColorBlendFactor=vk::BlendFactor::eOne,
-        .dstColorBlendFactor=vk::BlendFactor::eZero,
-        .colorBlendOp=vk::BlendOp::eAdd,
-        .srcAlphaBlendFactor=vk::BlendFactor::eOne,
-        .dstAlphaBlendFactor=vk::BlendFactor::eZero,
-        .alphaBlendOp=vk::BlendOp::eAdd,
-        .colorWriteMask=vk::ColorComponentFlagBits::eR | vk::ColorComponentFlagBits::eG |
-                        vk::ColorComponentFlagBits::eB | vk::ColorComponentFlagBits::eA
-    };
-
-    vk::PipelineColorBlendStateCreateInfo color_blend_info{
-        .logicOpEnable=VK_FALSE,
-        .logicOp=vk::LogicOp::eCopy,
-        .attachmentCount=1,
-        .pAttachments=&color_blend_attachment,
-        .blendConstants=std::array<float, 4>{0.0f, 0.0f, 0.0f, 0.0f}
-    };
-
-    descriptor_set_layouts.push_back(device.createDescriptorSetLayout({
-        .bindingCount=static_cast<uint32_t>(layout_bindings.size()),
-        .pBindings=layout_bindings.data()
-    }));
-    std::vector<vk::DescriptorSetLayout> vk_descriptor_set_layouts{};
-    std::ranges::transform(descriptor_set_layouts, std::back_inserter(vk_descriptor_set_layouts), [](auto& dsl) {
-        return *dsl;
-    });
-
-    auto vertex_info = vertex_desc.GetInfo();
-    pipeline_layouts.push_back(device.createPipelineLayout({
-        .setLayoutCount=static_cast<uint32_t>(vk_descriptor_set_layouts.size()),
-        .pSetLayouts=vk_descriptor_set_layouts.data(),
-        .pushConstantRangeCount=0,
-        .pPushConstantRanges=nullptr
-    }));
-    vk::PipelineLayout vk_pipeline_layout = *pipeline_layouts.back();
-    vk::RenderPass vk_render_pass = *render_pass;
-    uint32_t subpass_id = 0;
-    pipelines.push_back(vk::raii::Pipeline(device, nullptr, vk::GraphicsPipelineCreateInfo{
-        .stageCount=static_cast<uint32_t>(shader_stages.size()),
-        .pStages=shader_stages.data(),
-        .pVertexInputState=&vertex_info,
-        .pInputAssemblyState=&input_assembly_info,
-        .pViewportState=&viewport_info,
-        .pRasterizationState=&rasterizer_info,
-        .pMultisampleState=&multisampling_info,
-        .pDepthStencilState=nullptr,
-        .pColorBlendState=&color_blend_info,
-        .pDynamicState=&dynamic_state_info,
-        .layout=vk_pipeline_layout,
-        .renderPass=vk_render_pass,
-        .subpass=subpass_id,
-        .basePipelineHandle=VK_NULL_HANDLE,
-        .basePipelineIndex=-1
-    }));
-}
-
-
-void State::InitQueues(const vk::raii::Device& device, const uint32_t queue_family_index) {
     graphics_queue = vk::raii::Queue{device, 0, 0};
     present_queue = vk::raii::Queue{device, 0, 1};
+
     command_pools.push_back(device.createCommandPool({
         .flags=vk::CommandPoolCreateFlagBits::eResetCommandBuffer,
         .queueFamilyIndex=queue_family_index
-    }));
-    command_buffers.push_back({device, {
-        .commandPool=*(command_pools.back()),
-        .level=vk::CommandBufferLevel::ePrimary,
-        .commandBufferCount=1
-    }});
-    semaphores.push_back(device.createSemaphore({}));
-    semaphores.push_back(device.createSemaphore({}));
-    fences.push_back(device.createFence({.flags=vk::FenceCreateFlagBits::eSignaled}));
+    }, vk_allocation_callbacks.value_or(nullptr)));
 }
 
 
-void State::InitRenderPass(const vk::raii::Device& device, const vk::Format pixel_format, const vk::Extent2D target_extent) {
-    vk::AttachmentDescription color_attachment{
-        .format=pixel_format,
-        .samples=vk::SampleCountFlagBits::e1,
-        .loadOp=vk::AttachmentLoadOp::eClear,
-        .storeOp=vk::AttachmentStoreOp::eStore,
-        .stencilLoadOp=vk::AttachmentLoadOp::eDontCare,
-        .stencilStoreOp=vk::AttachmentStoreOp::eDontCare,
-        .initialLayout=vk::ImageLayout::eUndefined,
-        .finalLayout=vk::ImageLayout::ePresentSrcKHR
-    };
-
-    vk::AttachmentReference color_attachment_reference{
-        .attachment=0,
-        .layout=vk::ImageLayout::eColorAttachmentOptimal
-    };
-
-    vk::SubpassDescription subpass_desc{
-        .pipelineBindPoint=vk::PipelineBindPoint::eGraphics,
-        .inputAttachmentCount=0,
-        .pInputAttachments=nullptr,
-        .colorAttachmentCount=1,
-        .pColorAttachments=&color_attachment_reference,
-        .pResolveAttachments=nullptr,
-        .pDepthStencilAttachment=nullptr,
-        .preserveAttachmentCount=0,
-        .pPreserveAttachments=nullptr
-    };
-
-    std::vector<vk::SubpassDependency> subpass_deps{
-        {
-            .srcSubpass=VK_SUBPASS_EXTERNAL,// vk::SubpassDependency::eE...?
-            .dstSubpass=0,
-            .srcStageMask=vk::PipelineStageFlagBits::eColorAttachmentOutput,
-            .dstStageMask=vk::PipelineStageFlagBits::eColorAttachmentOutput,
-            .srcAccessMask=vk::AccessFlagBits::eNone,
-            .dstAccessMask=vk::AccessFlagBits::eColorAttachmentWrite
-        }
-    };
-
-    render_passes.push_back(vk::raii::RenderPass{device, {
-        .attachmentCount=1,
-        .pAttachments=&color_attachment,
-        .subpassCount=1,
-        .pSubpasses=&subpass_desc,
-        .dependencyCount=static_cast<uint32_t>(subpass_deps.size()),
-        .pDependencies=subpass_deps.data()
-    }});
-}
-
-
-void State::InitSwapchain(const vk::raii::Device& device,
+void State::InitSwapchain(vk::raii::Device& device,
+                          vk::raii::SurfaceKHR& surface,
                           const jms::vulkan::RenderInfo& render_info,
-                          const vk::raii::SurfaceKHR& surface,
-                          const vk::raii::RenderPass& render_pass) {
-    swapchain = vk::raii::SwapchainKHR{device, {
+                          std::optional<vk::RenderPass> render_pass,
+                          std::optional<vk::AllocationCallbacks*> vk_allocation_callbacks) {
+    swapchain = device.createSwapchainKHR({
         .flags=vk::SwapchainCreateFlagsKHR(),
         .surface=*surface,
         .minImageCount=render_info.image_count,
@@ -430,40 +255,43 @@ void State::InitSwapchain(const vk::raii::Device& device,
         .presentMode=render_info.present_mode,
         .clipped=VK_TRUE,
         .oldSwapchain=VK_NULL_HANDLE
-    }};
+    }, vk_allocation_callbacks.value_or(nullptr));
 
     std::vector<vk::Image> swapchain_images = swapchain.getImages();
-    for (auto image : swapchain_images) {
-        swapchain_image_views.push_back({device, {
-            .image=image,
-            .viewType=vk::ImageViewType::e2D,
-            .format=render_info.format,
-            .components={
-                .r = vk::ComponentSwizzle::eIdentity,
-                .g = vk::ComponentSwizzle::eIdentity,
-                .b = vk::ComponentSwizzle::eIdentity,
-                .a = vk::ComponentSwizzle::eIdentity
-            },
-            .subresourceRange={
-                .aspectMask=vk::ImageAspectFlagBits::eColor,
-                .baseMipLevel=0,
-                .levelCount=1,
-                .baseArrayLayer=0,
-                .layerCount=1
-            }
-        }});
+    for (auto& image : swapchain_images) {
+        swapchain_image_views.push_back(
+            device.createImageView({
+                .image=image,
+                .viewType=vk::ImageViewType::e2D,
+                .format=render_info.format,
+                .components={
+                    .r = vk::ComponentSwizzle::eIdentity,
+                    .g = vk::ComponentSwizzle::eIdentity,
+                    .b = vk::ComponentSwizzle::eIdentity,
+                    .a = vk::ComponentSwizzle::eIdentity
+                },
+                .subresourceRange={
+                    .aspectMask=vk::ImageAspectFlagBits::eColor,
+                    .baseMipLevel=0,
+                    .levelCount=1,
+                    .baseArrayLayer=0,
+                    .layerCount=1
+                }
+            }, vk_allocation_callbacks.value_or(nullptr)));
     }
 
+    if (!render_pass.has_value()) { return; }
     for (auto& image_view : swapchain_image_views) {
         std::array<vk::ImageView, 1> attachments = {*image_view};
-        swapchain_framebuffers.push_back(vk::raii::Framebuffer{device, vk::FramebufferCreateInfo{
-            .renderPass=*render_pass,
-            .attachmentCount=static_cast<uint32_t>(attachments.size()),
-            .pAttachments=attachments.data(),
-            .width=render_info.extent.width,
-            .height=render_info.extent.height,
-            .layers=1
-        }});
+        swapchain_framebuffers.push_back(
+            device.createFramebuffer({
+                .renderPass=*render_pass,
+                .attachmentCount=static_cast<uint32_t>(attachments.size()),
+                .pAttachments=attachments.data(),
+                .width=render_info.extent.width,
+                .height=render_info.extent.height,
+                .layers=1
+            }, vk_allocation_callbacks.value_or(nullptr)));
     }
 }
 

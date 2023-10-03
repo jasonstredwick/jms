@@ -5,6 +5,8 @@
 #include <filesystem>
 #include <format>
 #include <fstream>
+#include <optional>
+#include <ranges>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -14,98 +16,116 @@
 
 namespace jms {
 namespace vulkan {
-namespace shader {
-
-
-struct Info {
-    uint32_t subgroup_size{0};
-    vk::ShaderCreateFlagsEXT flags{};
-    vk::ShaderStageFlagBits stage{};
-    vk::ShaderStageFlags next_stage{};
-    vk::ShaderCodeTypeEXT code_type;
-    std::vector<uint32_t> code{};
-    std::vector<vk::DescriptorSetLayoutBinding> layout_bindings{};
-    std::vector<vk::PushConstantRange> push_constant_ranges{};
-    vk::SpecializationInfo specialization_info{};
-    std::string entry_point_name{};
-};
 
 
 struct ShaderGroup {
-    vk::raii::Device* device;
-    vk::AllocationCallbacks* vk_allocation_callbacks;
-    std::vector<Info> shader_info{};
-    std::vector<vk::raii::DescriptorSetLayout> layouts{};
-    std::vector<vk::raii::ShaderEXT> shaders{};
+    struct ShaderInfo {
+        uint32_t subgroup_size{0};
+        vk::ShaderCreateFlagsEXT flags{};
+        vk::ShaderStageFlagBits stage{};
+        vk::ShaderStageFlags next_stage{};
+        vk::ShaderCodeTypeEXT code_type{vk::ShaderCodeTypeEXT::eSpirv};
+        std::vector<uint32_t> code{};
+        std::string entry_point_name{};
+        std::vector<size_t> set_info_indices{};
+        std::vector<size_t> push_constant_ranges_indices{};
+        std::optional<vk::SpecializationInfo> specialization_info{};
+    };
 
-    ShaderGroup(vk::raii::Device& device,
-                std::vector<Info>&& shader_info_input,
-                vk::AllocationCallbacks* vk_allocation_callbacks = nullptr)
-    : device{std::addressof(device)},
-      vk_allocation_callbacks{vk_allocation_callbacks},
-      shader_info{std::move(shader_info_input)}
+    std::vector<vk::VertexInputAttributeDescription2EXT> vertex_attribute_desc{};
+    std::vector<vk::VertexInputBindingDescription2EXT> vertex_binding_desc{};
+    std::vector<vk::PushConstantRange> push_constant_ranges{};
+    std::vector<std::vector<vk::DescriptorSetLayoutBinding>> set_layout_bindings{};
+    std::vector<ShaderInfo> shader_infos{};
+
+    // May want to switch to C api to take advantage of failure handles for retry.  Wait to see raii failures first.
+    std::vector<vk::raii::ShaderEXT> CreateShaders(
+        vk::raii::Device& device,
+        const std::vector<vk::raii::DescriptorSetLayout>& layouts,
+        std::optional<vk::AllocationCallbacks*> vk_allocation_callbacks = std::nullopt)
     {
-        Validate(shader_info);
-
         std::vector<vk::PipelineShaderStageRequiredSubgroupSizeCreateInfo> pnexts{};
+        pnexts.reserve(shader_infos.size());
+        std::ranges::transform(shader_infos, std::back_inserter(pnexts), [](auto& info) {
+            return vk::PipelineShaderStageRequiredSubgroupSizeCreateInfo{.requiredSubgroupSize=info.subgroup_size};
+        });
+
+        std::vector<std::vector<vk::DescriptorSetLayout>> info_vk_layouts{};
+        info_vk_layouts.reserve(shader_infos.size());
+        std::ranges::transform(shader_infos, std::back_inserter(info_vk_layouts),
+            [&layouts](auto& info) {
+                std::vector<vk::DescriptorSetLayout> vk_layouts{};
+                vk_layouts.reserve(info.set_info_indices.size());
+                for (size_t index : info.set_info_indices) { vk_layouts.push_back(*layouts.at(index)); }
+                return vk_layouts;
+            });
+
+        std::vector<std::vector<vk::PushConstantRange>> info_pcrs{};
+        info_pcrs.reserve(shader_infos.size());
+        std::ranges::transform(shader_infos, std::back_inserter(info_pcrs),
+            [&pcr=push_constant_ranges](auto& info) {
+                std::vector<vk::PushConstantRange> pcrs{};
+                pcrs.reserve(info.push_constant_ranges_indices.size());
+                for (size_t index : info.push_constant_ranges_indices) { pcrs.push_back(pcr.at(index)); }
+                return pcrs;
+            });
+
         std::vector<vk::ShaderCreateInfoEXT> create_infos{};
-        for (auto& info : shader_info) {
-            pnexts.push_back({.requiredSubgroupSize=info.subgroup_size});
-            auto& pnext = pnexts.back();
-            auto& layout = layouts.emplace_back(device.createDescriptorSetLayout({
-                .bindingCount=static_cast<uint32_t>(info.layout_bindings.size()),
-                .pBindings=info.layout_bindings.data()
-            }));
-            std::vector<vk::DescriptorSetLayout> vk_descriptor_set_layouts{*layout};
-            vk::ShaderCreateInfoEXT create_info{
-                .pNext=(info.subgroup_size > 0 ? std::addressof(pnext) : nullptr),
-                .flags=info.flags,
-                .stage=info.stage,
-                .nextStage=info.next_stage,
-                .codeType=info.code_type,
-                .codeSize=(info.code.size() * sizeof(decltype(info.code)::value_type)),
-                .pCode=info.code.data(),
-                .pName=info.entry_point_name.c_str(),
-                .setLayoutCount=static_cast<uint32_t>(vk_descriptor_set_layouts.size()),
-                .pSetLayouts=vk_descriptor_set_layouts.data(),
-                .pushConstantRangeCount=static_cast<uint32_t>(info.push_constant_ranges.size()),
-                .pPushConstantRanges=info.push_constant_ranges.data(),
-                .pSpecializationInfo=std::addressof(info.specialization_info)
-            };
-            create_infos.push_back(create_info);
-        }
-        shaders = this->device->createShadersEXT(create_infos, vk_allocation_callbacks);
-    }
-    ShaderGroup(const ShaderGroup&) = delete;
-    ShaderGroup& operator=(const ShaderGroup&) = delete;
+        create_infos.reserve(shader_infos.size());
+        std::ranges::transform(
+            shader_infos,
+            std::views::zip(pnexts, info_vk_layouts, info_pcrs),
+            std::back_inserter(create_infos),
+            [](auto& info, auto&& tup) -> vk::ShaderCreateInfoEXT {
+                const auto& [pnext, vk_layouts, pcrs] = tup;
+                return {
+                    .pNext=(info.subgroup_size > 0 ? std::addressof(pnext) : nullptr),
+                    .flags=info.flags,
+                    .stage=info.stage,
+                    .nextStage=info.next_stage,
+                    .codeType=info.code_type,
+                    .codeSize=(info.code.size() * sizeof(decltype(info.code)::value_type)),
+                    .pCode=info.code.data(),
+                    .pName=info.entry_point_name.c_str(),
+                    .setLayoutCount=static_cast<uint32_t>(vk_layouts.size()),
+                    .pSetLayouts=(vk_layouts.size() > 0 ? vk_layouts.data() : nullptr),
+                    .pushConstantRangeCount=static_cast<uint32_t>(pcrs.size()),
+                    .pPushConstantRanges=(pcrs.size() > 0 ? pcrs.data() : nullptr),
+                    .pSpecializationInfo=(info.specialization_info.has_value() ?
+                                          std::addressof(info.specialization_info.value()) : nullptr)
+                };
+            });
 
-    void Bind(vk::raii::CommandBuffer& command_buffer,
-              const std::vector<size_t> indices,
-              const std::vector<vk::ShaderStageFlagBits> stage_bits) {
-        std::vector<vk::ShaderEXT> vk_shaders{};
-        // add stages bits/shaders and check for duplicate stages (error); invalid indices ... etc
-        for (auto& index : indices) {
-            vk_shaders.push_back(*shaders[index]);
-        }
-        // check features for tesellationShader and geometryShader and disable stages if enabled and not used.
-        command_buffer.bindShadersEXT(stage_bits, vk_shaders);
+        return device.createShadersEXT(create_infos, vk_allocation_callbacks.value_or(nullptr));
     }
 
-    vk::raii::Device& GetDevice() const noexcept { return *device; }
-    vk::AllocationCallbacks* GetAllocationCallbacks() const noexcept { return vk_allocation_callbacks; }
-    const std::vector<Info>& GetShaderInfo() const noexcept { return shader_info; }
+    // Consider an uber validation function with custom exceptions vs current approach with individual validations.
+    void Validate(const std::vector<ShaderInfo>& shader_infos) {
+        if (auto it = std::ranges::find_if(shader_infos, ShaderGroup::IsUnlinkable); it != shader_infos.end()) {
+            throw std::runtime_error{"Shader info cannot be linked; invalid stage provided."};
+        }
+        if (auto it = std::ranges::find_if(shader_infos, ShaderGroup::IsBadFragment); it != shader_infos.end()) {
+            throw std::runtime_error{"ShaderExtInfo has bad fragment related flags."};
+        }
+        if (auto it = std::ranges::find_if(shader_infos, ShaderGroup::IsBadSubgroupSize, &ShaderInfo::subgroup_size);
+            it != shader_infos.end()) {
+            throw std::runtime_error{
+                "vk::PipelineShaderStageRequiredSubgroupSizeCreateInfo requires power of two size."};
+        }
+        // Do more of the rest of the required validation here ...
+    }
 
 private:
     static constexpr vk::ShaderStageFlags UNLINKABLE_STAGES = ~(vk::ShaderStageFlagBits::eAllGraphics |
                                                                 vk::ShaderStageFlagBits::eTaskEXT |
                                                                 vk::ShaderStageFlagBits::eMeshEXT);
 
-    static constexpr auto IsUnlinkable = [](const Info& v) -> bool {
+    static constexpr auto IsUnlinkable = [](const ShaderInfo& v) -> bool {
         return static_cast<bool>(v.flags & vk::ShaderCreateFlagBitsEXT::eLinkStage) &&
                static_cast<bool>(v.stage & UNLINKABLE_STAGES);
     };
 
-    static constexpr auto IsBadFragment = [](const Info& v) -> bool {
+    static constexpr auto IsBadFragment = [](const ShaderInfo& v) -> bool {
         bool has_fragment_stage = static_cast<bool>(v.stage & vk::ShaderStageFlagBits::eFragment);
         if (has_fragment_stage) {
             // Also need to check for feature attachmentFragmentShadingRate ???
@@ -123,26 +143,10 @@ private:
         }
         return false;
     }
-
-    // Consider an uber validation function with custom exceptions vs current approach with individual validations.
-    void Validate(const std::vector<Info>& shader_info) {
-        if (auto it = std::ranges::find_if(shader_info, ShaderGroup::IsUnlinkable); it != shader_info.end()) {
-            throw std::runtime_error{"Info cannot be linked; invalid stage provided."};
-        }
-        if (auto it = std::ranges::find_if(shader_info, ShaderGroup::IsBadFragment); it != shader_info.end()) {
-            throw std::runtime_error{"ShaderExtInfo has bad fragment related flags."};
-        }
-        if (auto it = std::ranges::find_if(shader_info, ShaderGroup::IsBadSubgroupSize, &Info::subgroup_size);
-            it != shader_info.end()) {
-            throw std::runtime_error{
-                "vk::PipelineShaderStageRequiredSubgroupSizeCreateInfo requires power of two size."};
-        }
-        // Do more of the rest of the required validation here ...
-    }
 };
 
 
-std::vector<uint32_t> Load(const std::filesystem::path& path, const vk::raii::Device& device) {
+std::vector<uint32_t> Load(const std::filesystem::path& path) {
     if (!std::filesystem::exists(path)) {
         throw std::runtime_error(std::format("Shader file does not exist: {}\n", path.string()));
     }
@@ -164,6 +168,5 @@ std::vector<uint32_t> Load(const std::filesystem::path& path, const vk::raii::De
 }
 
 
-}
 }
 }

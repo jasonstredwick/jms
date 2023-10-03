@@ -1,4 +1,114 @@
+#include <algorithm>
+#include <array>
+#include <optional>
+#include <ranges>
+#include <stdexcept>
+#include <vector>
+
+#include "jms/vulkan/vulkan.hpp"
+
+
+constexpr const size_t WIDTH = 1024;
+constexpr const size_t HEIGHT = 1024;
+
+
+struct GraphicsRenderingState {
+    vk::RenderingFlags flags{};
+    uint32_t layer_count{1};
+    uint32_t view_mask{0};
+    vk::Rect2D render_area{.offset{0, 0}, .extent{0, 0}};
+    std::vector<vk::RenderingAttachmentInfo> color_attachments{
+        {
+            .imageLayout=vk::ImageLayout::eColorAttachmentOptimal,
+            .loadOp=vk::AttachmentLoadOp::eClear,
+            .storeOp=vk::AttachmentStoreOp::eStore,
+            .clearValue=vk::ClearValue{.color={std::array<float, 4>{0.0f, 0.0f, 0.0f, 0.0f}}}
+        }
+    };
+    std::optional<vk::RenderingAttachmentInfo> depth_attachment{};
+    std::optional<vk::RenderingAttachmentInfo> stencil_attachment{};
+
+    std::vector<vk::Viewport> viewports{
+        {
+            .x=0.0f,
+            .y=0.0f,
+            .width=0,
+            .height=0,
+            .minDepth=0.0f,
+            .maxDepth=1.0f
+        }
+    };
+    std::vector<vk::Rect2D> scissors{{.offset={0, 0}, .extent={0, 0}}};
+
+    vk::PrimitiveTopology primitive_topology = vk::PrimitiveTopology::eTriangleList;
+    bool primitive_restart_enabled = false;
+
+    bool rasterization_discard_enabled = false;
+    vk::PolygonMode rasterization_polygon_mode = vk::PolygonMode::eFill;
+    vk::CullModeFlags rasterization_cull_mode = vk::CullModeFlagBits::eBack;
+    vk::FrontFace rasterization_front_face = vk::FrontFace::eCounterClockwise; //vk::FrontFace::eClockwise  ---- review
+    float rasterization_line_width = 1.0f;
+    bool rasterization_depth_clamp_enabled = false;
+    bool rasterization_depth_bias_enabled = false;
+    std::array<float, 3> rasterization_depth_bias{0.0f, 0.0f, 0.0f};
+};
+
+
+
+
+
+void Convert(
+    vk::raii::ImageView& target_image_view,
+    vk::Format pixel_format,
+    const GraphicsRenderingState& graphics_rendering_info
+) {
+    std::vector<vk::AttachmentDescription> vk_color_attachments{};
+    vk_color_attachments.reserve(graphics_rendering_info.color_attachments.size());
+    auto ConvertColorAttachment = [&pixel_format](const vk::RenderingAttachmentInfo& v) {
+        return vk::AttachmentDescription{
+            .format=pixel_format,
+            .samples=vk::SampleCountFlagBits::e1,
+            .loadOp=v.loadOp,
+            .storeOp=v.storeOp,
+            .stencilLoadOp=vk::AttachmentLoadOp::eDontCare,
+            .stencilStoreOp=vk::AttachmentStoreOp::eDontCare,
+            .initialLayout=vk::ImageLayout::eUndefined,
+            .finalLayout=vk::ImageLayout::ePresentSrcKHR
+        };
+    };
+    std::ranges::transform(graphics_rendering_info.color_attachments, std::back_inserter(vk_color_attachments),
+                           ConvertColorAttachment);
+
+    std::vector<vk::AttachmentReference> vk_color_attachment_references{};
+    vk_color_attachment_references.reserve(graphics_rendering_info.color_attachments.size());
+    auto ConvertColorAttachmentReference = [&pixel_format](const vk::RenderingAttachmentInfo& v, int32_t index) {
+        return vk::AttachmentReference{
+            .attachment=static_cast<uint32_t>(index),
+            .layout=v.imageLayout
+        };
+    };
+    std::ranges::transform(graphics_rendering_info.color_attachments, std::views::iota(0),
+                           std::back_inserter(vk_color_attachment_references),
+                           ConvertColorAttachmentReference);
+
+    vk::SubpassDescription subpass_desc{
+        .pipelineBindPoint=vk::PipelineBindPoint::eGraphics,
+    };
+}
+
+
 #if 0
+    std::vector<vk::RenderingAttachmentInfo> color_attachments{
+        {
+            .imageLayout=vk::ImageLayout::eColorAttachmentOptimal,
+            .resolveMode={},
+            .resolveImageView={},
+            .resolveImageLayout={},
+            .clearValue=clear_value
+        }
+    };
+
+
 void DrawFrame(DrawState& draw_state) {
     auto& vulkan_state = draw_state.vulkan_state;
     auto& image_available_semaphore = vulkan_state.semaphores.at(0);

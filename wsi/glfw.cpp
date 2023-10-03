@@ -1,8 +1,6 @@
 #include "glfw.hpp"
 
-#ifdef VK_USE_PLATFORM_WIN32_KHR
 #include <format>
-#endif
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -44,7 +42,8 @@ vk::raii::SurfaceKHR CreateSurface(Window& window,
                                    const vk::raii::Instance& instance,
                                    const vk::AllocationCallbacks* allocator) {
     VkSurfaceKHR surface_raw = nullptr;
-    const VkAllocationCallbacks *vk_allocator = (allocator) ? &static_cast<const VkAllocationCallbacks&>(*allocator) : nullptr;
+    const VkAllocationCallbacks* vk_allocator = nullptr;
+    if (allocator) { vk_allocator = std::addressof(static_cast<const VkAllocationCallbacks&>(*allocator)); }
     if (glfwCreateWindowSurface(*instance, window.get(), vk_allocator, &surface_raw) != VK_SUCCESS) {
         throw std::runtime_error("GLFW failed to create a surface for the given window.");
     }

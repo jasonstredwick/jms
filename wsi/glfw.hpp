@@ -104,7 +104,9 @@ struct Window {
 
 
 std::vector<std::string> GetVulkanInstanceExtensions();
-vk::raii::SurfaceKHR CreateSurface(Window& window, const vk::raii::Instance& instance, const vk::AllocationCallbacks* allocator=nullptr);
+vk::raii::SurfaceKHR CreateSurface(Window& window,
+                                   const vk::raii::Instance& instance,
+                                   const vk::AllocationCallbacks* allocator=nullptr);
 
 
 }
