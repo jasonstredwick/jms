@@ -78,13 +78,13 @@ struct ShaderGroup {
             std::back_inserter(create_infos),
             [](auto& info, auto&& tup) -> vk::ShaderCreateInfoEXT {
                 const auto& [pnext, vk_layouts, pcrs] = tup;
-                return {
+                return vk::ShaderCreateInfoEXT{
                     .pNext=(info.subgroup_size > 0 ? std::addressof(pnext) : nullptr),
                     .flags=info.flags,
                     .stage=info.stage,
                     .nextStage=info.next_stage,
                     .codeType=info.code_type,
-                    .codeSize=(info.code.size() * sizeof(decltype(info.code)::value_type)),
+                    .codeSize=(info.code.size() * sizeof(typename decltype(info.code)::value_type)),
                     .pCode=info.code.data(),
                     .pName=info.entry_point_name.c_str(),
                     .setLayoutCount=static_cast<uint32_t>(vk_layouts.size()),
