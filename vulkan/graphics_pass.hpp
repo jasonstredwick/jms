@@ -11,6 +11,7 @@
 #include "jms/vulkan/vulkan.hpp"
 #include "jms/vulkan/graphics_rendering_state.hpp"
 #include "jms/vulkan/shader.hpp"
+#include "jms/vulkan/utils.hpp"
 
 
 namespace jms {
@@ -18,8 +19,8 @@ namespace vulkan {
 
 
 struct GraphicsPass {
-    GraphicsRenderingState rendering_state;
-    ShaderGroup shader_group;
+    GraphicsRenderingState rendering_state{};
+    ShaderGroup shader_group{};
     std::vector<std::vector<vk::DescriptorPoolSize>> set_pool_sizes{};
     std::vector<vk::raii::DescriptorSetLayout> layouts{};
     vk::raii::PipelineLayout pipeline_layout{nullptr};
@@ -51,7 +52,7 @@ struct GraphicsPass {
             [&device, &vk_allocation_callbacks](const auto& layout_bindings) -> vk::raii::DescriptorSetLayout{
                 return device.createDescriptorSetLayout({
                     .bindingCount=static_cast<uint32_t>(layout_bindings.size()),
-                    .pBindings=(layout_bindings.size() > 0 ? layout_bindings.data() : nullptr)
+                    .pBindings=VectorAsPtr(layout_bindings)
                 }, vk_allocation_callbacks.value_or(nullptr));
             });
 
@@ -60,15 +61,15 @@ struct GraphicsPass {
         std::ranges::transform(layouts, std::back_inserter(vk_layouts), [](auto& layout) { return *layout; });
         pipeline_layout = device.createPipelineLayout({
             .setLayoutCount=static_cast<uint32_t>(vk_layouts.size()),
-            .pSetLayouts=(vk_layouts.size() > 0 ? vk_layouts.data() : nullptr),
+            .pSetLayouts=VectorAsPtr(vk_layouts),
             .pushConstantRangeCount=static_cast<uint32_t>(shader_group.push_constant_ranges.size()),
-            .pPushConstantRanges=(shader_group.push_constant_ranges.size() > 0 ?
-                                  shader_group.push_constant_ranges.data() : nullptr)
+            .pPushConstantRanges=VectorAsPtr(shader_group.push_constant_ranges)
         }, vk_allocation_callbacks.value_or(nullptr));
 
         shaders = shader_group.CreateShaders(device, layouts, vk_allocation_callbacks);
     }
     GraphicsPass(const GraphicsPass&) = delete;
+    // default ok; only vk::raii, data only structs, std::vector and defaulted destructor
     GraphicsPass(GraphicsPass&&) noexcept = default;
     ~GraphicsPass() noexcept = default;
     GraphicsPass& operator=(const GraphicsPass&) = delete;
@@ -96,24 +97,30 @@ struct GraphicsPass {
         vk::raii::DescriptorPool pool = device.createDescriptorPool({
             .maxSets=static_cast<uint32_t>(max_sets),
             .poolSizeCount=static_cast<uint32_t>(pool_sizes.size()),
-            .pPoolSizes=(pool_sizes.size() > 0 ? pool_sizes.data() : nullptr)
+            .pPoolSizes=VectorAsPtr(pool_sizes)
         }, vk_allocation_callbacks.value_or(nullptr));
         return pool;
     }
 
-    vk::raii::DescriptorSets CreateDescriptorSets(vk::raii::Device& device,
-                                                  vk::raii::DescriptorPool& pool,
-                                                  std::vector<size_t> set_indices) {
+    // Vulkan does not like DescriptorSets to be cleaned up without a special flag.  Going to return the wrapper
+    // reference rather than raii variant instead.
+    std::vector<vk::DescriptorSet> CreateDescriptorSets(vk::raii::Device& device,
+                                                        vk::raii::DescriptorPool& pool,
+                                                        std::vector<size_t> set_indices) {
         std::vector<vk::DescriptorSetLayout> vk_layouts{};
         vk_layouts.reserve(set_indices.size());
         std::ranges::transform(set_indices, std::back_inserter(vk_layouts), [&layouts=layouts](size_t index) {
             return *layouts.at(index);
         });
-        return vk::raii::DescriptorSets{device, vk::DescriptorSetAllocateInfo{
+        auto raii_sets = device.allocateDescriptorSets(vk::DescriptorSetAllocateInfo{
             .descriptorPool=*pool,
             .descriptorSetCount=static_cast<uint32_t>(vk_layouts.size()),
-            .pSetLayouts=(vk_layouts.size() > 0 ? vk_layouts.data() : nullptr)
-        }};
+            .pSetLayouts=VectorAsPtr(vk_layouts)
+        });
+        std::vector<vk::DescriptorSet> vk_descriptor_sets{};
+        vk_descriptor_sets.reserve(raii_sets.size());
+        std::ranges::transform(raii_sets, std::back_inserter(vk_descriptor_sets), [](auto& i) { return i.release(); });
+        return vk_descriptor_sets;
     }
 
     void ToCommands(vk::raii::CommandBuffer& command_buffer,
@@ -149,7 +156,7 @@ struct GraphicsPass {
             .layerCount=rendering_state.layer_count,
             .viewMask=rendering_state.view_mask,
             .colorAttachmentCount=static_cast<uint32_t>(color_attachments.size()),
-            .pColorAttachments=(color_attachments.size() > 0 ? color_attachments.data() : nullptr),
+            .pColorAttachments=VectorAsPtr(color_attachments),
             .pDepthAttachment=(rendering_state.depth_attachment.has_value() ?
                                std::addressof(rendering_state.depth_attachment.value()) : nullptr),
             .pStencilAttachment=(rendering_state.stencil_attachment.has_value() ?
@@ -227,7 +234,7 @@ struct GraphicsPass {
 
     // Need to add support for inline descriptors
     void UpdateDescriptorSets(vk::raii::Device& device,
-                              vk::raii::DescriptorSet& descriptor_set,
+                              vk::DescriptorSet& descriptor_set,
                               size_t set_index,
                               const std::vector<std::tuple<size_t, vk::DescriptorBufferInfo>>& buffer_data,
                               const std::vector<std::tuple<size_t, vk::DescriptorImageInfo>>& image_data,
@@ -247,7 +254,7 @@ struct GraphicsPass {
         auto CreateF = [&descriptor_set, &set_index, &set_layout_bindings=shader_group.set_layout_bindings](size_t i) {
                 auto& layout = set_layout_bindings.at(set_index).at(i);
                 return vk::WriteDescriptorSet{
-                    .dstSet=*descriptor_set,
+                    .dstSet=descriptor_set,
                     .dstBinding=layout.binding,
                     .dstArrayElement=0,
                     .descriptorCount=1,

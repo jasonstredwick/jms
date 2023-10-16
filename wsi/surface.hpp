@@ -6,7 +6,7 @@
 #include <stdexcept>
 
 #include "jms/vulkan/vulkan.hpp"
-#include "jms/vulkan/render_info.hpp"
+#include "jms/vulkan/info.hpp"
 
 
 namespace jms {

@@ -2,6 +2,7 @@
 
 
 #include <array>
+#include <optional>
 #include <vector>
 
 #include "jms/vulkan/vulkan.hpp"
@@ -39,16 +40,16 @@ struct GraphicsRenderingState {
     };
     std::vector<vk::Rect2D> scissors{{.offset={0, 0}, .extent={0, 0}}};
 
-    vk::PrimitiveTopology primitive_topology = vk::PrimitiveTopology::eTriangleList;
-    bool primitive_restart_enabled = false;
+    vk::PrimitiveTopology primitive_topology{vk::PrimitiveTopology::eTriangleList};
+    bool primitive_restart_enabled{false};
 
-    bool rasterization_discard_enabled = false;
-    vk::PolygonMode rasterization_polygon_mode = vk::PolygonMode::eFill;
-    vk::CullModeFlags rasterization_cull_mode = vk::CullModeFlagBits::eBack;
-    vk::FrontFace rasterization_front_face = vk::FrontFace::eCounterClockwise; //vk::FrontFace::eClockwise  ---- review
-    float rasterization_line_width = 1.0f;
-    bool rasterization_depth_clamp_enabled = false;
-    bool rasterization_depth_bias_enabled = false;
+    bool rasterization_discard_enabled{false};
+    vk::PolygonMode rasterization_polygon_mode{vk::PolygonMode::eFill};
+    vk::CullModeFlags rasterization_cull_mode{vk::CullModeFlagBits::eBack};
+    vk::FrontFace rasterization_front_face{vk::FrontFace::eCounterClockwise}; //vk::FrontFace::eClockwise  ---- review
+    float rasterization_line_width{1.0f};
+    bool rasterization_depth_clamp_enabled{false};
+    bool rasterization_depth_bias_enabled{false};
     std::array<float, 3> rasterization_depth_bias{0.0f, 0.0f, 0.0f};
 };
 

@@ -15,12 +15,11 @@
 
 #include "jms/vulkan/vulkan.hpp"
 #include "jms/vulkan/debug/default.hpp"
+#include "jms/vulkan/info.hpp"
 #include "jms/vulkan/memory.hpp"
-#include "jms/vulkan/render_info.hpp"
 #include "jms/vulkan/shader.hpp"
 #include "jms/vulkan/types.hpp"
-#include "jms/vulkan/utils.hpp"
-#include "jms/vulkan/vertex_description.hpp"
+#include "jms/vulkan/variants.hpp"
 
 
 namespace jms {
@@ -28,9 +27,9 @@ namespace vulkan {
 
 
 struct alignas(16) InstanceConfig {
-    uint32_t api_version=0;
-    uint32_t app_version = 0;
-    uint32_t engine_version = 0;
+    uint32_t api_version{0};
+    uint32_t app_version{0};
+    uint32_t engine_version{0};
     std::string app_name{};
     std::string engine_name{};
     std::vector<std::string> layer_names{};
@@ -63,33 +62,18 @@ struct State {
     vk::raii::Queue present_queue{nullptr};
     std::vector<vk::raii::CommandPool> command_pools{};
     std::vector<std::vector<vk::raii::CommandBuffer>> command_buffers{};
-    std::vector<vk::raii::DescriptorPool> descriptor_pools{};
-    std::vector<vk::raii::DescriptorSet> descriptor_sets{};
-
-    vk::raii::SurfaceKHR surface{nullptr};
-    vk::raii::SwapchainKHR swapchain{nullptr};
-    std::vector<vk::raii::Framebuffer> swapchain_framebuffers{};
-    std::vector<vk::raii::ImageView> swapchain_image_views{};
-
-
-
-
-    std::vector<vk::raii::DescriptorSetLayout> descriptor_set_layouts{};
-    std::vector<vk::raii::PipelineLayout> pipeline_layouts{};
-    std::vector<vk::raii::Pipeline> pipelines{};
     std::vector<vk::raii::Semaphore> semaphores{};
     std::vector<vk::raii::Fence> fences{};
+    vk::raii::SurfaceKHR surface{nullptr};
+    vk::raii::SwapchainKHR swapchain{nullptr};
+    MemoryHelper<std::vector, jms::NoMutex> memory_helper{};
 
-    std::vector<vk::raii::Buffer> buffers{};
-    std::vector<vk::raii::ShaderModule> shader_modules{};
-
-    State() = default;
+    State() noexcept = default;
     State(const State&) = delete;
-    State(State&&) = default;
+    State(State&&) noexcept = default;
+    ~State() noexcept = default;
     State& operator=(const State&) = delete;
-    State& operator=(State&&) = default;
-
-    vk::raii::PhysicalDevice& PhysicalDevice(size_t index) { return physical_devices.at(index); }
+    State& operator=(State&&) noexcept = default;
 
     vk::raii::Device& InitDevice(vk::raii::PhysicalDevice& physical_device,
                                  DeviceConfig&& cfg,
@@ -101,7 +85,7 @@ struct State {
     void InitSwapchain(vk::raii::Device& device,
                        vk::raii::SurfaceKHR& surface,
                        const jms::vulkan::RenderInfo& render_info,
-                       std::optional<vk::RenderPass> render_pass = std::nullopt,
+                       //std::optional<vk::RenderPass> render_pass = std::nullopt,
                        std::optional<vk::AllocationCallbacks*> vk_allocation_callbacks = std::nullopt);
 };
 
@@ -236,7 +220,7 @@ void State::InitQueues(size_t device_index, std::optional<vk::AllocationCallback
 void State::InitSwapchain(vk::raii::Device& device,
                           vk::raii::SurfaceKHR& surface,
                           const jms::vulkan::RenderInfo& render_info,
-                          std::optional<vk::RenderPass> render_pass,
+                          //std::optional<vk::RenderPass> render_pass,
                           std::optional<vk::AllocationCallbacks*> vk_allocation_callbacks) {
     swapchain = device.createSwapchainKHR({
         .flags=vk::SwapchainCreateFlagsKHR(),
@@ -257,27 +241,13 @@ void State::InitSwapchain(vk::raii::Device& device,
         .oldSwapchain=VK_NULL_HANDLE
     }, vk_allocation_callbacks.value_or(nullptr));
 
+#if 0
+    ImageViewInfo iv_info{.format=render_info.format};
     std::vector<vk::Image> swapchain_images = swapchain.getImages();
     for (auto& image : swapchain_images) {
         swapchain_image_views.push_back(
-            device.createImageView({
-                .image=image,
-                .viewType=vk::ImageViewType::e2D,
-                .format=render_info.format,
-                .components={
-                    .r = vk::ComponentSwizzle::eIdentity,
-                    .g = vk::ComponentSwizzle::eIdentity,
-                    .b = vk::ComponentSwizzle::eIdentity,
-                    .a = vk::ComponentSwizzle::eIdentity
-                },
-                .subresourceRange={
-                    .aspectMask=vk::ImageAspectFlagBits::eColor,
-                    .baseMipLevel=0,
-                    .levelCount=1,
-                    .baseArrayLayer=0,
-                    .layerCount=1
-                }
-            }, vk_allocation_callbacks.value_or(nullptr)));
+            device.createImageView(iv_info.ToCreateInfo(image),
+                                   vk_allocation_callbacks.value_or(nullptr)));
     }
 
     if (!render_pass.has_value()) { return; }
@@ -293,6 +263,7 @@ void State::InitSwapchain(vk::raii::Device& device,
                 .layers=1
             }, vk_allocation_callbacks.value_or(nullptr)));
     }
+#endif
 }
 
 

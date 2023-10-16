@@ -97,6 +97,22 @@ void Convert(
 }
 
 
+/*
+
+    vk::PhysicalDeviceMemoryProperties2 props2 = physical_device.getMemoryProperties2();
+    vk::PhysicalDeviceMemoryProperties physical_device_mem_props = props2.memoryProperties;
+    vk::PhysicalDeviceMemoryBudgetPropertiesEXT* budget_props = nullptr;
+    if (props2.pNext) {
+        if (auto* ptr = jms::vulkan::Convert<vk::PhysicalDeviceMemoryBudgetPropertiesEXT>(props2.pNext); ptr) {
+            budget_props = ptr;
+        } else {
+            throw std::runtime_error(std::format("Unknown PhysicalDeviceMemory extension: {}\n",
+                                                    vk::to_string(jms::vulkan::ExtractSType(props2.pNext))));
+        }
+    }
+*/
+
+
 #if 0
     std::vector<vk::RenderingAttachmentInfo> color_attachments{
         {

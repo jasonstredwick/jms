@@ -139,58 +139,51 @@ enum class DescriptorFrequency {
  * Fallback could also be defined as wrapper memory_resource or allocator that contains an ordered list of memory resources, etc
  * that checks for certain exceptions raised and call the next in line.  Should be easy to create the list using base class pointers.
 */
+template <template <typename> typename Container_t_, typename Mutex_t_/*=jms::NoMutex*/>
 class MemoryHelper {
-    const vk::raii::PhysicalDevice& physical_device;
-    vk::raii::Device* device;
-    vk::AllocationCallbacks* vk_allocation_callbacks;
+    using Container_t = Container_t_;
+    using Mutex_t = Mutex_t_;
 
-    uint32_t optimal_pipeline_memory_type_index;
-    uint32_t optimal_read_memory_type_index;
-    uint32_t optimal_read_write_memory_type_index;
-    uint32_t optimal_write_memory_type_index;
+    struct DeviceMemoryData{
+        jms::vulkan::DeviceMemoryResource dmr;
+        uint32_t memory_type_index;
+    };
 
-    size_t max_allocations;
-    size_t min_uniform_alignment;
-    size_t min_storage_alignment;
+    const vk::raii::PhysicalDevice* physical_device{nullptr};
+    vk::raii::Device* device{nullptr};
+    std::optional<vk::AllocationCallbacks*> vk_allocation_callbacks{std::nullopt};
+
+    std::vector<DeviceMemoryData> memory_resources_data{};
 
 public:
     MemoryHelper(const vk::raii::PhysicalDevice& physical_device,
                  vk::raii::Device& device,
-                 vk::AllocationCallbacks* vk_allocation_callbacks=nullptr)
-    : physical_device{physical_device},
+                 const std::vector<vk::MemoryPropertyFlags>& memory_resource_infos,
+                 std::optional<vk::AllocationCallbacks*> vk_allocation_callbacks = std::nullopt)
+    : physical_device{std::addressof(physical_device)},
       device{std::addressof(device)},
       vk_allocation_callbacks{vk_allocation_callbacks}
-    { Init(); }
+    { Init(memory_resource_infos); }
 
     DeviceMemoryResource CreateDirectMemoryResource(uint32_t memory_type_index) {
-        // validate requested index ... { throw std::runtime_error{"CreateDirectMemoryResource requires valid memory_type_index."}; }
+        // validate requested index ...
+        //     { throw std::runtime_error{"CreateDirectMemoryResource requires valid memory_type_index."}; }
         return {*device, memory_type_index, vk_allocation_callbacks};
     }
 
-    DeviceMemoryResourceAligned CreateDirectMemoryResource(uint32_t memory_type_index, vk::DeviceSize alignment) {
-        // validate requested index ... { throw std::runtime_error{"CreateDirectMemoryResource requires valid memory_type_index."}; }
-        return {*device, memory_type_index, alignment, vk_allocation_callbacks};
-    }
-
-    DeviceMemoryResource CreateDirectMemoryResource(AccessDirection access_direction) {
-        uint32_t index = 0;
-        if      (access_direction == AccessDirection::DEVICE)          { index = optimal_pipeline_memory_type_index; }
-        else if (access_direction == AccessDirection::HOST_READ)       { index = optimal_read_memory_type_index; }
-        else if (access_direction == AccessDirection::HOST_READ_WRITE) { index = optimal_read_write_memory_type_index; }
-        else if (access_direction == AccessDirection::HOST_WRITE)      { index = optimal_write_memory_type_index; }
-        else { throw std::runtime_error{"Creating a DirectMemoryResource requires valid AccessDirection."}; }
-        return {*device, index, vk_allocation_callbacks};
-    }
-
-    template <template <typename> typename Container, typename Mutex_t>
-    DeviceMemoryResourceMapped<Container, Mutex_t> CreateDeviceMemoryResourceMapped(DeviceMemoryResource& upstream) {
-        auto memory_type_index = upstream.GetMemoryTypeIndex();
-        auto props = physical_device.getMemoryProperties();
-        auto flags = props.memoryTypes[memory_type_index].propertyFlags;
+    auto CreateDeviceMemoryResourceMapped(size_t memory_resource_id) {
+        auto& data = memory_resources_data.at(memory_resource_id);
+        auto props = physical_device->getMemoryProperties();
+        auto flags = props.memoryTypes[data.memory_type_index].propertyFlags;
         if (!IsDeviceMemoryResourceMappedCapableMemoryType(flags)) {
             throw std::runtime_error{"CreateDeviceMemoryResourceMapped: invalid memory_type_index provided."};
         }
-        return DeviceMemoryResourceMapped<Container, Mutex_t>{upstream};
+        return DeviceMemoryResourceMapped<Container_t, Mutex_t>{data.dmr};
+    }
+
+    auto CreateImageAllocator(size_t memory_resource_id) {
+        auto& data = memory_resources_data.at(memory_resource_id);
+        return ImageResourceAllocator<Container_t, Mutex_t>{data.dmr, data.memory_type_index, *device};
     }
 
     template <typename MemoryResource_t> // template <MemoryResource_c T>
@@ -199,23 +192,26 @@ public:
     template <typename Resource_t> // template <Resource_c T>
     Resource_t CreateResource(auto&&... args) { return {std::forward<decltype(args)>(args)...}; }
 
-    uint32_t GetDeviceLocalMemoryType() {
-        auto props = physical_device.getMemoryProperties();
+    uint32_t GetDeviceLocalMemoryType(bool should_throw = true) {
+        auto props = physical_device->getMemoryProperties();
         for (auto i : std::views::iota(static_cast<uint32_t>(0), props.memoryTypeCount)) {
             auto flags = props.memoryTypes[i].propertyFlags;
             if (IsDeviceLocal(flags)) { return i; }
         }
+        if (should_throw) { throw std::runtime_error{"Failed to find suitable device local memory type."}; }
         return std::numeric_limits<uint32_t>::max();
     }
 
-    uint32_t GetDeviceMemoryResourceMappedCapableMemoryType(vk::MemoryPropertyFlags opt_flags = {}) {
-        auto props = physical_device.getMemoryProperties();
+    uint32_t GetDeviceMemoryResourceMappedCapableMemoryType(vk::MemoryPropertyFlags opt_flags = {},
+                                                            bool should_throw = true) {
+        auto props = physical_device->getMemoryProperties();
         for (auto i : std::views::iota(static_cast<uint32_t>(0), props.memoryTypeCount)) {
             auto flags = props.memoryTypes[i].propertyFlags;
             if (IsDeviceMemoryResourceMappedCapableMemoryType(flags) && (flags & opt_flags) == opt_flags) {
                 return i;
             }
         }
+        if (should_throw) { throw std::runtime_error{"Failed to find suitable mapped capable memory type."}; }
         return std::numeric_limits<uint32_t>::max();
     }
 
@@ -233,15 +229,20 @@ public:
     bool IsMemoryTypeIndexOutOfBounds(uint32_t i) { return i == std::numeric_limits<uint32_t>::max(); }
 
 private:
-    void Init() {
-    }
-    void Init2() {
-        //vkGetDeviceBufferMemoryRequirements
-        vk::BufferCreateInfo bci{};
-        vk::DeviceBufferMemoryRequirements dbmr{.pCreateInfo=&bci};
-        vk::MemoryRequirements2 reqs2 = device->getBufferMemoryRequirements(dbmr);
-        // reqs2->pNext is nullptr unless requesting dedicated memory
-        vk::MemoryRequirements mr = reqs2.memoryRequirements;
+    void Init(const std::vector<vk::MemoryPropertyFlags>& memory_resource_infos) {
+        vk::PhysicalDeviceMemoryProperties pprops = physical_device->getMemoryProperties();
+        std::ranges::transform(memory_resource_infos, std::back_inserter(memory_resource_data), [&props](auto& flags) {
+            for (auto index : std::views::iota(static_cast<uint32_t>(0), props.memoryTypeCount)) {
+                auto index_flags = props.memoryTypes[index].propertyFlags;
+                if (flags & index_flags == flags) {
+                    return DeviceMemoryData{
+                        .dmr=CreateDirectMemoryResource(index),
+                        .memory_type_index=index
+                    };
+                }
+            }
+            throw std::runtime_error{"Failed to find suitable mapped capable memory type."};
+        });
     }
 };
 

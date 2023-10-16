@@ -2,13 +2,13 @@
 
 
 #include <algorithm>
-#include <functional>
+#include <iterator>
 #include <memory>
-#include <memory_resource>
 #include <mutex>
 #include <new>
 #include <span>
 #include <stdexcept>
+#include <utility>
 
 #include "allocation.hpp"
 #include "resources.hpp"
@@ -43,8 +43,8 @@ class AdhocPool : public Resource<Allocation_t> {
         SpaceContainer<Space> free_space{};
     };
 
-    Resource<Allocation_t>* upstream;
-    size_type chunk_size;
+    Resource<Allocation_t>* upstream{nullptr};
+    size_type chunk_size{0};
     ChunkContainer<Chunk> chunks{};
     Mutex_t mutex{};
 
@@ -55,10 +55,20 @@ public:
         if (chunk_size < 1) { throw std::runtime_error{"Chunk size must be a positive value."}; }
     }
     AdhocPool(const AdhocPool&) = delete;
-    AdhocPool& operator=(const AdhocPool&) = delete;
+    AdhocPool(AdhocPool&& other) noexcept { *this = other; }
     ~AdhocPool() noexcept override { Clear(); }
+    AdhocPool& operator=(const AdhocPool&) = delete;
+    AdhocPool& operator=(AdhocPool&&) noexcept {
+        std::scoped_lock lock{mutex, other.mutex};
+        upstream = std::exchange(other.upstream, nullptr);
+        chunk_size = other.chunk_size;
+        chunks = std::move(other.chunks);
+        return *this;
+    }
 
-    [[nodiscard]] Allocation_t Allocate(size_type size) override {
+    [[nodiscard]] Allocation_t Allocate(size_type size,
+                                        size_type data_alignment,
+                                        size_type pointer_alignment) override {
         if (size < 1) { throw std::bad_alloc{}; }
         auto IsEnough = [needed=size](auto available) -> bool { return available >= needed; };
         std::lock_guard<Mutex_t>{mutex};
@@ -101,12 +111,12 @@ public:
             else if (right.offset == offset + size) { right.offset = offset; right.size += size; }
             else { chunk.free_space.insert(right_it, {.offset=offset, .size=size}); }
         } else if (right_it == chunk.free_space.end()) {
-            Space& left = *std::prev(right_it);
+            Space& left = *std::ranges::prev(right_it);
             if (offset < left.offset + left.size) { throw std::runtime_error{"Found overlapping suballocation."}; }
             else if (offset == left.offset + left.size) { left.size += size; }
             else { chunk.free_space.push_back({.offset=offset, .size=size}); }
         } else {
-            Space& left = *std::prev(right_it);
+            Space& left = *std::ranges::prev(right_it);
             Space& right = *right_it;
             if (offset < left.offset + left.size || right.offset < offset + size) {
                 throw std::runtime_error{"Found overlapping suballocation."};
@@ -165,10 +175,23 @@ public:
         if (chunk_size % block_size > 0) { throw std::runtime_error{"Chunk size must be multiple of block size."}; }
     }
     BlockPool(const BlockPool&) = delete;
-    BlockPool& operator=(const BlockPool&) = delete;
+    BlockPool(BlockPool&& other) noexcept { *this = other; }
     ~BlockPool() noexcept override { Clear(); }
+    BlockPool& operator=(const BlockPool&) = delete;
+    BlockPool& operator=(BlockPool&&) noexcept {
+        std::scoped_lock lock{mutex, other.mutex};
+        upstream = std::exchange(other.upstream, nullptr);
+        block_size = other.block_size;
+        chunk_size = other.chunk_size;
+        chunks = std::move(other.chunks);
+        blocks = std::move(other.blocks);
+        free_block_it = std::move(free_block_it);
+        return *this;
+    }
 
-    [[nodiscard]] Allocation_t Allocate([[maybe_unused]] size_type size) override {
+    [[nodiscard]] Allocation_t Allocate([[maybe_unused]] size_type size,
+                                        size_type data_alignment,
+                                        size_type pointer_alignment) override {
         std::lock_guard<Mutex_t>{mutex};
         if (free_block_it == blocks.end()) {
             Allocation_t result = upstream->Allocate(chunk_size);
@@ -181,7 +204,7 @@ public:
             free_block_it = blocks.end() - num_blocks;
         }
         Block& block = *free_block_it;
-        free_block_it = std::next(free_block_it);
+        free_block_it = std::ranges::next(free_block_it);
         return {.ptr=block.ptr, .offset=block.offset, .size=block_size};
     }   
 
@@ -198,7 +221,7 @@ public:
             throw std::runtime_error{"Deallocate cannot find allocated block to free."};
         }
         std::swap(*block_it, allocated_blocks.back());
-        free_block_it = std::prev(free_block_it);
+        free_block_it = std::ranges::prev(free_block_it);
     }
 
     void Clear() {
@@ -248,16 +271,28 @@ public:
         if (options.allocate_initial_chunk) { AllocateNextChunk(0); chunk_it = chunks.begin(); }
     }
     Monotonic(const Monotonic&) = delete;
-    Monotonic& operator=(const Monotonic&) = delete;
+    Monotonic(Monotonic&& other) noexcept { *this = other; }
     ~Monotonic() noexcept override { Clear(); }
+    Monotonic& operator=(const Monotonic&) = delete;
+    Monotonic& operator=(Monotonic&& other) noexcept {
+        std::scoped_lock lock{mutex, other.mutex};
+        upstream = std::exchange(other.upstream, nullptr);
+        options = other.options;
+        next_size = other.next_size;
+        chunks = std::move(other.chunks);
+        chunk_it = std::move(chunk_it);
+        return *this;
+    }
 
-    [[nodiscard]] Allocation_t Allocate(size_type size) override {
+    [[nodiscard]] Allocation_t Allocate(size_type size,
+                                        size_type data_alignment,
+                                        size_type pointer_alignment) override {
         if (size < 1) { throw std::bad_alloc{}; }
         std::lock_guard<Mutex_t>{mutex};
         while (chunk_it != chunks.end() && chunk_it->offset + size >= chunk_it->chunk_size) {
-            chunk_it = std::next(chunk_it);
+            chunk_it = std::ranges::next(chunk_it);
         }
-        if (chunk_it == chunks.end()) { AllocateNextChunk(size); chunk_it = std::prev(chunks.end()); }
+        if (chunk_it == chunks.end()) { AllocateNextChunk(size); chunk_it = std::ranges::prev(chunks.end()); }
         size_type offset = std::exchange(chunk_it->offset, chunk_it->offset + size);
         return {.ptr=chunk_it->ptr, .offset=offset, .size=size};
     }

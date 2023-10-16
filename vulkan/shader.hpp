@@ -88,9 +88,9 @@ struct ShaderGroup {
                     .pCode=info.code.data(),
                     .pName=info.entry_point_name.c_str(),
                     .setLayoutCount=static_cast<uint32_t>(vk_layouts.size()),
-                    .pSetLayouts=(vk_layouts.size() > 0 ? vk_layouts.data() : nullptr),
+                    .pSetLayouts=VectorAsPtr(vk_layouts),
                     .pushConstantRangeCount=static_cast<uint32_t>(pcrs.size()),
-                    .pPushConstantRanges=(pcrs.size() > 0 ? pcrs.data() : nullptr),
+                    .pPushConstantRanges=VectorAsPtr(pcrs),
                     .pSpecializationInfo=(info.specialization_info.has_value() ?
                                           std::addressof(info.specialization_info.value()) : nullptr)
                 };
