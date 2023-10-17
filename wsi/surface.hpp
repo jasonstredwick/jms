@@ -16,7 +16,8 @@ namespace wsi {
 jms::vulkan::RenderInfo FromSurface(const vk::raii::SurfaceKHR& surface,
                                     const vk::raii::PhysicalDevice& physical_device,
                                     uint32_t client_width,
-                                    uint32_t client_height) {
+                                    uint32_t client_height,
+                                    uint32_t num_images = 3) {
     auto surface_formats_vec = physical_device.getSurfaceFormatsKHR(*surface);
     if (surface_formats_vec.empty()) { throw std::runtime_error("No formats found for surface."); }
 
@@ -49,7 +50,8 @@ jms::vulkan::RenderInfo FromSurface(const vk::raii::SurfaceKHR& surface,
                                    surface_caps.maxImageExtent.height);
     }
 
-    uint32_t image_count = std::ranges::min(surface_caps.minImageCount, static_cast<uint32_t>(2));
+    uint32_t image_count = num_images;
+    if (image_count < surface_caps.minImageCount) { image_count = surface_caps.minImageCount; }
     if (surface_caps.maxImageCount > 0 && image_count > surface_caps.maxImageCount) {
         image_count = surface_caps.maxImageCount;
     }
