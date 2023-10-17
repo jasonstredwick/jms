@@ -141,21 +141,21 @@ enum class DescriptorFrequency {
 */
 template <template <typename> typename Container_t_, typename Mutex_t_/*=jms::NoMutex*/>
 class MemoryHelper {
-    using Container_t = Container_t_;
+    template <typename T> using Container_t = Container_t_<T>;
     using Mutex_t = Mutex_t_;
 
     struct DeviceMemoryData{
-        jms::vulkan::DeviceMemoryResource dmr;
+        DeviceMemoryResource dmr;
         uint32_t memory_type_index;
     };
 
     const vk::raii::PhysicalDevice* physical_device{nullptr};
     vk::raii::Device* device{nullptr};
     std::optional<vk::AllocationCallbacks*> vk_allocation_callbacks{std::nullopt};
-
     std::vector<DeviceMemoryData> memory_resources_data{};
 
 public:
+    MemoryHelper() noexcept = default;
     MemoryHelper(const vk::raii::PhysicalDevice& physical_device,
                  vk::raii::Device& device,
                  const std::vector<vk::MemoryPropertyFlags>& memory_resource_infos,
@@ -164,6 +164,11 @@ public:
       device{std::addressof(device)},
       vk_allocation_callbacks{vk_allocation_callbacks}
     { Init(memory_resource_infos); }
+    MemoryHelper(const MemoryHelper&) = delete;
+    MemoryHelper(MemoryHelper&&) noexcept = default; // no destruction and std::vector
+    ~MemoryHelper() noexcept = default;
+    MemoryHelper& operator=(const MemoryHelper&) = delete;
+    MemoryHelper& operator=(MemoryHelper&&) noexcept = default;
 
     DeviceMemoryResource CreateDirectMemoryResource(uint32_t memory_type_index) {
         // validate requested index ...
@@ -229,20 +234,18 @@ public:
     bool IsMemoryTypeIndexOutOfBounds(uint32_t i) { return i == std::numeric_limits<uint32_t>::max(); }
 
 private:
-    void Init(const std::vector<vk::MemoryPropertyFlags>& memory_resource_infos) {
-        vk::PhysicalDeviceMemoryProperties pprops = physical_device->getMemoryProperties();
-        std::ranges::transform(memory_resource_infos, std::back_inserter(memory_resource_data), [&props](auto& flags) {
-            for (auto index : std::views::iota(static_cast<uint32_t>(0), props.memoryTypeCount)) {
-                auto index_flags = props.memoryTypes[index].propertyFlags;
-                if (flags & index_flags == flags) {
-                    return DeviceMemoryData{
-                        .dmr=CreateDirectMemoryResource(index),
-                        .memory_type_index=index
-                    };
+    void Init(const std::vector<vk::MemoryPropertyFlags>& memory_resources_flags) {
+        vk::PhysicalDeviceMemoryProperties props = physical_device->getMemoryProperties();
+        std::ranges::transform(memory_resources_flags, std::back_inserter(memory_resources_data),
+            [this, &props](auto& mr_flags) -> DeviceMemoryData {
+                for (auto index : std::views::iota(static_cast<uint32_t>(0), props.memoryTypeCount)) {
+                    auto index_flags = props.memoryTypes[index].propertyFlags;
+                    if ((mr_flags & index_flags) == mr_flags) {
+                        return {.dmr=this->CreateDirectMemoryResource(index), .memory_type_index=index};
+                    }
                 }
-            }
-            throw std::runtime_error{"Failed to find suitable mapped capable memory type."};
-        });
+                throw std::runtime_error{"Failed to find suitable capable memory type."};
+            });
     }
 };
 
@@ -451,10 +454,10 @@ struct StorageBuffer {
       buffer(device.createBuffer({.size=buffer_size, .usage=usage, .sharingMode=vk::SharingMode::eExclusive}))
     {
         vk::MemoryRequirements mem_reqs = buffer.getMemoryRequirements();
-        std::vector<uint32_t> restricted_indices = jms::vulkan::RestrictMemoryTypes(physical_device,
-                                                                                    optimal_indices,
-                                                                                    mem_reqs.memoryTypeBits,
-                                                                                    prohibited_flags);
+        std::vector<uint32_t> restricted_indices = RestrictMemoryTypes(physical_device,
+                                                                       optimal_indices,
+                                                                       mem_reqs.memoryTypeBits,
+                                                                       prohibited_flags);
         if (restricted_indices.empty()) {
             throw std::runtime_error("Failed to create vertex buffer ... no compatible memory type found.");
         }
@@ -551,10 +554,10 @@ void SyncBuffersToGPU(vk::raii::Device& device, vk::raii::CommandPool& command_p
     });
     vk::MemoryRequirements mem_reqs_vs = buffer_vs.getMemoryRequirements();
     vk::MemoryPropertyFlags prohibited_flags_vs = vk::MemoryPropertyFlagBits::eDeviceLocal;
-    std::vector<uint32_t> restricted_indices_vs = jms::vulkan::RestrictMemoryTypes(physical_device,
-                                                                                    optimal_indices,
-                                                                                    mem_reqs_vs.memoryTypeBits,
-                                                                                    prohibited_flags_vs);
+    std::vector<uint32_t> restricted_indices_vs = RestrictMemoryTypes(physical_device,
+                                                                      optimal_indices,
+                                                                      mem_reqs_vs.memoryTypeBits,
+                                                                      prohibited_flags_vs);
     if (restricted_indices_vs.empty()) { throw std::runtime_error("Failed to create vertex staging buffer ... no compatible memory type found."); }
     vk::raii::DeviceMemory device_memory_vs = device.allocateMemory({
         .allocationSize= mem_reqs_vs.size,
@@ -571,10 +574,10 @@ void SyncBuffersToGPU(vk::raii::Device& device, vk::raii::CommandPool& command_p
         .sharingMode=vk::SharingMode::eExclusive
     });
     vk::MemoryRequirements mem_reqs_v = buffer_v.getMemoryRequirements();
-    std::vector<uint32_t> restricted_indices_v = jms::vulkan::RestrictMemoryTypes(physical_device,
-                                                                                    optimal_indices,
-                                                                                    mem_reqs_v.memoryTypeBits,
-                                                                                    {});
+    std::vector<uint32_t> restricted_indices_v = RestrictMemoryTypes(physical_device,
+                                                                     optimal_indices,
+                                                                     mem_reqs_v.memoryTypeBits,
+                                                                     {});
     if (restricted_indices_v.empty()) { throw std::runtime_error("Failed to create vertex buffer ... no compatible memory type found."); }
     vk::raii::DeviceMemory device_memory_v = device.allocateMemory({
         .allocationSize= mem_reqs_v.size,
@@ -592,10 +595,10 @@ void SyncBuffersToGPU(vk::raii::Device& device, vk::raii::CommandPool& command_p
     });
     vk::MemoryRequirements mem_reqs_is = buffer_is.getMemoryRequirements();
     vk::MemoryPropertyFlags prohibited_flags_is = vk::MemoryPropertyFlagBits::eDeviceLocal;
-    std::vector<uint32_t> restricted_indices_is = jms::vulkan::RestrictMemoryTypes(physical_device,
-                                                                                    optimal_indices,
-                                                                                    mem_reqs_is.memoryTypeBits,
-                                                                                    prohibited_flags_is);
+    std::vector<uint32_t> restricted_indices_is = RestrictMemoryTypes(physical_device,
+                                                                      optimal_indices,
+                                                                      mem_reqs_is.memoryTypeBits,
+                                                                      prohibited_flags_is);
     if (restricted_indices_is.empty()) { throw std::runtime_error("Failed to create indices staging buffer ... no compatible memory type found."); }
     vk::raii::DeviceMemory device_memory_is = device.allocateMemory({
         .allocationSize= mem_reqs_is.size,
@@ -612,10 +615,10 @@ void SyncBuffersToGPU(vk::raii::Device& device, vk::raii::CommandPool& command_p
         .sharingMode=vk::SharingMode::eExclusive
     });
     vk::MemoryRequirements mem_reqs_i = buffer_i.getMemoryRequirements();
-    std::vector<uint32_t> restricted_indices_i = jms::vulkan::RestrictMemoryTypes(physical_device,
-                                                                                    optimal_indices,
-                                                                                    mem_reqs_i.memoryTypeBits,
-                                                                                    {});
+    std::vector<uint32_t> restricted_indices_i = RestrictMemoryTypes(physical_device,
+                                                                     optimal_indices,
+                                                                     mem_reqs_i.memoryTypeBits,
+                                                                     {});
     if (restricted_indices_i.empty()) { throw std::runtime_error("Failed to create indices buffer ... no compatible memory type found."); }
     vk::raii::DeviceMemory device_memory_i = device.allocateMemory({
         .allocationSize= mem_reqs_i.size,
@@ -626,7 +629,7 @@ void SyncBuffersToGPU(vk::raii::Device& device, vk::raii::CommandPool& command_p
     /***
      * Copy staging to device
     */
-    jms::vulkan::SyncBuffersToGPU(device, vulkan_state.command_pools.at(0), vulkan_state.graphics_queue, {
+    SyncBuffersToGPU(device, vulkan_state.command_pools.at(0), vulkan_state.graphics_queue, {
         {.src=buffer_vs, .dst=buffer_v, .num_to_copy=vertex_buffer_size_in_bytes},
         {.src=buffer_is, .dst=buffer_i, .num_to_copy=indices_size_in_bytes}
     });

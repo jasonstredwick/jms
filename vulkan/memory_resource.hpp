@@ -49,7 +49,11 @@ public:
       vk_allocation_callbacks{vk_allocation_callbacks.value_or(nullptr)},
       memory_type_index{memory_type_index}
     {}
+    DeviceMemoryResource(const DeviceMemoryResource&) = default;
+    DeviceMemoryResource(DeviceMemoryResource&&) noexcept = default;
     ~DeviceMemoryResource() noexcept override = default;
+    DeviceMemoryResource& operator=(const DeviceMemoryResource&) = default;
+    DeviceMemoryResource& operator=(DeviceMemoryResource&&) = default;
 
     [[nodiscard]] DeviceMemoryAllocation Allocate(size_type size, 
                                                   [[maybe_unused]] size_type data_alignment,
@@ -212,7 +216,7 @@ class ResourceAllocator {
 public:
     using pointer_type = ResourceAllocation_t::pointer_type;
     using size_type = ResourceAllocation_t::size_type;
-    using Container_t = Container_t_;
+    template <typename T> using Container_t = Container_t_<T>;
     using Mutex_t = Mutex_t_;
 
 private:

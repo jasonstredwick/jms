@@ -13,13 +13,7 @@ template <typename Allocation_t>
 struct Resource {
     using allocation_type = Allocation_t;
 
-    Resource() noexcept = default;
-    Resource(const Resource&) = delete;
-    Resource(Resource&&) = delete;
     virtual ~Resource() noexcept = default;
-    Resource& operator=(const Resource&) = delete;
-    Resource& operator=(Resource&&) = delete;
-
     [[nodiscard]] virtual allocation_type Allocate(allocation_type::size_type size,
                                                    allocation_type::size_type data_alignment,
                                                    allocation_type::size_type pointer_alignment) = 0;

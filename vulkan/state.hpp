@@ -13,6 +13,7 @@
 #include <variant>
 #include <vector>
 
+#include "jms/utils/no_mutex.hpp"
 #include "jms/vulkan/vulkan.hpp"
 #include "jms/vulkan/debug/default.hpp"
 #include "jms/vulkan/info.hpp"
@@ -58,14 +59,15 @@ struct State {
     vk::raii::PhysicalDevices physical_devices{nullptr};
     std::vector<DeviceConfig> device_configs{};
     std::vector<vk::raii::Device> devices{};
-    vk::raii::Queue graphics_queue{nullptr};
-    vk::raii::Queue present_queue{nullptr};
+    std::vector<vk::raii::Queue> graphics_queue{};
+    std::vector<vk::raii::Queue> present_queue{};
     std::vector<vk::raii::CommandPool> command_pools{};
     std::vector<std::vector<vk::raii::CommandBuffer>> command_buffers{};
     std::vector<vk::raii::Semaphore> semaphores{};
     std::vector<vk::raii::Fence> fences{};
     vk::raii::SurfaceKHR surface{nullptr};
     vk::raii::SwapchainKHR swapchain{nullptr};
+    std::vector<vk::raii::ImageView> swapchain_image_views{};
     MemoryHelper<std::vector, jms::NoMutex> memory_helper{};
 
     State() noexcept = default;
@@ -80,8 +82,6 @@ struct State {
                                  std::optional<vk::AllocationCallbacks*> vk_allocation_callbacks = std::nullopt);
     void InitInstance(InstanceConfig&& cfg,
                       std::optional<vk::AllocationCallbacks*> vk_allocation_callbacks = std::nullopt);
-    void InitQueues(size_t device_index,
-                    std::optional<vk::AllocationCallbacks*> vk_allocation_callbacks = std::nullopt);
     void InitSwapchain(vk::raii::Device& device,
                        vk::raii::SurfaceKHR& surface,
                        const jms::vulkan::RenderInfo& render_info,
@@ -121,7 +121,7 @@ vk::raii::Device& State::InitDevice(vk::raii::PhysicalDevice& physical_device,
         }
     };
 
-    return devices.emplace_back(physical_device, vk::DeviceCreateInfo{
+    vk::raii::Device& device = devices.emplace_back(physical_device, vk::DeviceCreateInfo{
         .pNext=pnext,
         .queueCreateInfoCount=static_cast<uint32_t>(device_config.queue_infos.size()),
         .pQueueCreateInfos=device_config.queue_infos.data(),
@@ -131,6 +131,16 @@ vk::raii::Device& State::InitDevice(vk::raii::PhysicalDevice& physical_device,
         .ppEnabledExtensionNames=vk_extensions_name.data(),
         .pEnabledFeatures=features
     }, vk_allocation_callbacks.value_or(nullptr));
+
+    graphics_queue.emplace_back(device, 0, 0);
+    present_queue.emplace_back(device, 0, 1);
+
+    command_pools.push_back(device.createCommandPool({
+        .flags=vk::CommandPoolCreateFlagBits::eResetCommandBuffer,
+        .queueFamilyIndex=cfg.queue_family_index
+    }, vk_allocation_callbacks.value_or(nullptr)));
+
+    return device;
 }
 
 
@@ -203,20 +213,6 @@ void State::InitInstance(InstanceConfig&& cfg, std::optional<vk::AllocationCallb
 }
 
 
-void State::InitQueues(size_t device_index, std::optional<vk::AllocationCallbacks*> vk_allocation_callbacks) {
-    vk::raii::Device& device = devices.at(device_index);
-    uint32_t queue_family_index = device_configs.at(device_index).queue_family_index;
-
-    graphics_queue = vk::raii::Queue{device, 0, 0};
-    present_queue = vk::raii::Queue{device, 0, 1};
-
-    command_pools.push_back(device.createCommandPool({
-        .flags=vk::CommandPoolCreateFlagBits::eResetCommandBuffer,
-        .queueFamilyIndex=queue_family_index
-    }, vk_allocation_callbacks.value_or(nullptr)));
-}
-
-
 void State::InitSwapchain(vk::raii::Device& device,
                           vk::raii::SurfaceKHR& surface,
                           const jms::vulkan::RenderInfo& render_info,
@@ -241,7 +237,6 @@ void State::InitSwapchain(vk::raii::Device& device,
         .oldSwapchain=VK_NULL_HANDLE
     }, vk_allocation_callbacks.value_or(nullptr));
 
-#if 0
     ImageViewInfo iv_info{.format=render_info.format};
     std::vector<vk::Image> swapchain_images = swapchain.getImages();
     for (auto& image : swapchain_images) {
@@ -250,6 +245,7 @@ void State::InitSwapchain(vk::raii::Device& device,
                                    vk_allocation_callbacks.value_or(nullptr)));
     }
 
+#if 0
     if (!render_pass.has_value()) { return; }
     for (auto& image_view : swapchain_image_views) {
         std::array<vk::ImageView, 1> attachments = {*image_view};
