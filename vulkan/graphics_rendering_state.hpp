@@ -45,12 +45,16 @@ struct GraphicsRenderingState {
 
     bool rasterization_discard_enabled{false};
     vk::PolygonMode rasterization_polygon_mode{vk::PolygonMode::eFill};
-    vk::CullModeFlags rasterization_cull_mode{vk::CullModeFlagBits::eBack};
+    vk::CullModeFlags rasterization_cull_mode{vk::CullModeFlagBits::eNone};//vk::CullModeFlagBits::eBack};
     vk::FrontFace rasterization_front_face{vk::FrontFace::eCounterClockwise}; //vk::FrontFace::eClockwise  ---- review
     float rasterization_line_width{1.0f};
-    bool rasterization_depth_clamp_enabled{false};
-    bool rasterization_depth_bias_enabled{false};
-    std::array<float, 3> rasterization_depth_bias{0.0f, 0.0f, 0.0f};
+
+    bool depth_test_enabled{false};
+    bool depth_clamp_enabled{false};
+    bool depth_bias_enabled{false};
+    std::array<float, 3> depth_bias{0.0f, 0.0f, 0.0f};
+    vk::CompareOp depth_compare_op = vk::CompareOp::eNever;
+    bool depth_write_enabled{false};
 };
 
 

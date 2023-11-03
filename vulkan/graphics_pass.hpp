@@ -126,6 +126,7 @@ struct GraphicsPass {
     void ToCommands(vk::raii::CommandBuffer& command_buffer,
                     const std::vector<vk::ImageView>& color_attachment_targets,
                     const std::vector<vk::ImageView>& color_attachment_resolve_targets,
+                    const vk::ImageView& depth_image_view,
                     const std::vector<vk::DescriptorSet>& vk_descriptor_sets,
                     const std::vector<uint32_t>& descriptor_set_dynamic_offsets,
                     auto&&... DrawCommands) {
@@ -150,6 +151,12 @@ struct GraphicsPass {
         std::ranges::for_each(std::views::zip(color_attachments, color_attachment_resolve_targets),
                               [](auto&& tup) { std::get<0>(tup).resolveImageView = std::get<1>(tup); });
 
+        vk::RenderingAttachmentInfo depth_attachment{};
+        if (rendering_state.depth_attachment.has_value()) {
+            depth_attachment = rendering_state.depth_attachment.value();
+            depth_attachment.imageView = depth_image_view;
+        }
+
         command_buffer.beginRendering({
             .flags=rendering_state.flags,
             .renderArea=rendering_state.render_area,
@@ -158,7 +165,7 @@ struct GraphicsPass {
             .colorAttachmentCount=static_cast<uint32_t>(color_attachments.size()),
             .pColorAttachments=VectorAsPtr(color_attachments),
             .pDepthAttachment=(rendering_state.depth_attachment.has_value() ?
-                               std::addressof(rendering_state.depth_attachment.value()) : nullptr),
+                               std::addressof(depth_attachment) : nullptr),
             .pStencilAttachment=(rendering_state.stencil_attachment.has_value() ?
                                  std::addressof(rendering_state.stencil_attachment.value()) : nullptr)
         });
@@ -181,23 +188,26 @@ struct GraphicsPass {
         command_buffer.setCullModeEXT(rendering_state.rasterization_cull_mode);
         command_buffer.setFrontFaceEXT(rendering_state.rasterization_front_face); //vk::FrontFace::eClockwise  ---- review
         command_buffer.setLineWidth(rendering_state.rasterization_line_width);
-        command_buffer.setDepthClampEnableEXT(rendering_state.rasterization_depth_clamp_enabled);
-        command_buffer.setDepthBiasEnableEXT(rendering_state.rasterization_depth_bias_enabled);
-        command_buffer.setDepthBias(rendering_state.rasterization_depth_bias[0],
-                                    rendering_state.rasterization_depth_bias[1],
-                                    rendering_state.rasterization_depth_bias[2]);
 
-        // DepthStencilState
-        //command_buffer.setDepthTestEnableEXT(false);
-        //command_buffer.setDepthBoundsTestEnableEXT(false); // VkPipelineDepthStencilStateCreateInfo::depthBoundsTestEnable
+        // DepthState
+        command_buffer.setDepthTestEnable(rendering_state.depth_test_enabled);
+        command_buffer.setDepthClampEnableEXT(rendering_state.depth_clamp_enabled);
+        command_buffer.setDepthCompareOp(rendering_state.depth_compare_op);
+        command_buffer.setDepthWriteEnable(rendering_state.depth_write_enabled);
+
+
+
+        command_buffer.setDepthClipEnableEXT(false); // if not provided then VkPipelineRasterizationDepthClipStateCreateInfoEXT::depthClipEnable or if VkPipelineRasterizationDepthClipStateCreateInfoEXT is not provided then the inverse of setDepthClampEnableEXT
+        command_buffer.setDepthClipNegativeOneToOneEXT(false);
+        command_buffer.setDepthBoundsTestEnable(false); // VkPipelineDepthStencilStateCreateInfo::depthBoundsTestEnable
         //command_buffer.setDepthBounds(0.0f, 1.0f); // VkPipelineDepthStencilStateCreateInfo::minDepthBounds/maxDepthBounds
-        //command_buffer.setDepthClipEnableEXT(true); // if not provided then VkPipelineRasterizationDepthClipStateCreateInfoEXT::depthClipEnable or if VkPipelineRasterizationDepthClipStateCreateInfoEXT is not provided then the inverse of setDepthClampEnableEXT
-        //command_buffer.setDepthClipNegativeOneToOneEXT(false);
-        //command_buffer.setDepthWriteEnableEXT(false);
-        //command_buffer.setDepthCompareOpEXT(vk::CompareOp::eNever);
-        //command_buffer.setStencilTestEnableEXT(false);
+        command_buffer.setDepthBiasEnable(rendering_state.depth_bias_enabled);
+        //command_buffer.setDepthBias(rendering_state.depth_bias[0],
+        //                            rendering_state.depth_bias[1],
+        //                            rendering_state.depth_bias[2]);
 
         // Stencil stuff
+        //command_buffer.setStencilTestEnableEXT(false);
         //command_buffer.setStencilOpEXT({}, {}, {}, {}, {});
         //command_buffer.setStencilCompareMask({}, {});
         //command_buffer.setStencilWriteMask({}, {});
