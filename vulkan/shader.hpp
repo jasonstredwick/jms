@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "jms/vulkan/vulkan.hpp"
+#include "jms/vulkan/utils.hpp"
 
 
 namespace jms {

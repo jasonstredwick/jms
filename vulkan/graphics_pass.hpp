@@ -21,7 +21,7 @@ namespace vulkan {
 struct GraphicsPass {
     GraphicsRenderingState rendering_state{};
     ShaderGroup shader_group{};
-    std::vector<std::vector<vk::DescriptorPoolSize>> set_pool_sizes{};
+    std::vector<vk::DescriptorPoolSize> set_pool_sizes{};
     std::vector<vk::raii::DescriptorSetLayout> layouts{};
     vk::raii::PipelineLayout pipeline_layout{nullptr};
     std::vector<vk::raii::ShaderEXT> shaders{};
@@ -33,19 +33,17 @@ struct GraphicsPass {
     : rendering_state{graphics_rendering_state}, shader_group{shader_group_in} {
         shader_group.Validate(shader_group.shader_infos);
 
-        set_pool_sizes.reserve(shader_group.set_layout_bindings.size());
-        std::ranges::transform(shader_group.set_layout_bindings, std::back_inserter(set_pool_sizes),
-            [](const auto& layout_bindings) -> std::vector<vk::DescriptorPoolSize> {
-                std::map<vk::DescriptorType, size_t> counts{};
-                for (const auto& lb : layout_bindings) { counts[lb.descriptorType]++; }
-                std::vector<vk::DescriptorPoolSize> pool_sizes{};
-                pool_sizes.reserve(counts.size());
-                std::ranges::transform(counts, std::back_inserter(pool_sizes), [](auto& i) -> vk::DescriptorPoolSize {
-                    auto [descriptor_type, descriptor_count] = i;
-                    return {.type=descriptor_type, .descriptorCount=static_cast<uint32_t>(descriptor_count)};
-                });
-                return pool_sizes;
-            });
+        std::map<vk::DescriptorType, size_t> counts{};
+        std::ranges::for_each(shader_group.set_layout_bindings, [&counts](const auto& layout_bindings) {
+            for (const auto& lb : layout_bindings) { counts[lb.descriptorType]++; }
+        });
+
+        set_pool_sizes.reserve(counts.size());
+        std::ranges::transform(counts, std::back_inserter(set_pool_sizes), [](const auto& i) -> vk::DescriptorPoolSize {
+            auto [descriptor_type, descriptor_count] = i;
+            return {.type=descriptor_type, .descriptorCount=static_cast<uint32_t>(descriptor_count)};
+        });
+
 
         layouts.reserve(shader_group.set_layout_bindings.size());
         std::ranges::transform(shader_group.set_layout_bindings, std::back_inserter(layouts),
@@ -89,15 +87,12 @@ struct GraphicsPass {
 
     vk::raii::DescriptorPool CreateDescriptorPool(
         vk::raii::Device& device,
-        size_t set_index,
-        size_t max_sets,
         std::optional<vk::AllocationCallbacks*> vk_allocation_callbacks = std::nullopt)
     {
-        auto& pool_sizes = set_pool_sizes.at(set_index);
         vk::raii::DescriptorPool pool = device.createDescriptorPool({
-            .maxSets=static_cast<uint32_t>(max_sets),
-            .poolSizeCount=static_cast<uint32_t>(pool_sizes.size()),
-            .pPoolSizes=VectorAsPtr(pool_sizes)
+            .maxSets=static_cast<uint32_t>(layouts.size()),
+            .poolSizeCount=static_cast<uint32_t>(set_pool_sizes.size()),
+            .pPoolSizes=VectorAsPtr(set_pool_sizes)
         }, vk_allocation_callbacks.value_or(nullptr));
         return pool;
     }
@@ -105,13 +100,10 @@ struct GraphicsPass {
     // Vulkan does not like DescriptorSets to be cleaned up without a special flag.  Going to return the wrapper
     // reference rather than raii variant instead.
     std::vector<vk::DescriptorSet> CreateDescriptorSets(vk::raii::Device& device,
-                                                        vk::raii::DescriptorPool& pool,
-                                                        std::vector<size_t> set_indices) {
+                                                        vk::raii::DescriptorPool& pool) {
         std::vector<vk::DescriptorSetLayout> vk_layouts{};
-        vk_layouts.reserve(set_indices.size());
-        std::ranges::transform(set_indices, std::back_inserter(vk_layouts), [&layouts=layouts](size_t index) {
-            return *layouts.at(index);
-        });
+        vk_layouts.reserve(layouts.size());
+        std::ranges::transform(layouts, std::back_inserter(vk_layouts), [](auto& layout) { return *layout; });
         auto raii_sets = device.allocateDescriptorSets(vk::DescriptorSetAllocateInfo{
             .descriptorPool=*pool,
             .descriptorSetCount=static_cast<uint32_t>(vk_layouts.size()),
@@ -196,12 +188,12 @@ struct GraphicsPass {
         command_buffer.setDepthWriteEnable(rendering_state.depth_write_enabled);
 
 
-
-        command_buffer.setDepthClipEnableEXT(false); // if not provided then VkPipelineRasterizationDepthClipStateCreateInfoEXT::depthClipEnable or if VkPipelineRasterizationDepthClipStateCreateInfoEXT is not provided then the inverse of setDepthClampEnableEXT
-        command_buffer.setDepthClipNegativeOneToOneEXT(false);
-        command_buffer.setDepthBoundsTestEnable(false); // VkPipelineDepthStencilStateCreateInfo::depthBoundsTestEnable
+// Complaining about not setting up features correctly, temporarily remove
+//        command_buffer.setDepthClipEnableEXT(false); // if not provided then VkPipelineRasterizationDepthClipStateCreateInfoEXT::depthClipEnable or if VkPipelineRasterizationDepthClipStateCreateInfoEXT is not provided then the inverse of setDepthClampEnableEXT
+//        command_buffer.setDepthClipNegativeOneToOneEXT(false);
+//        command_buffer.setDepthBoundsTestEnable(false); // VkPipelineDepthStencilStateCreateInfo::depthBoundsTestEnable
         //command_buffer.setDepthBounds(0.0f, 1.0f); // VkPipelineDepthStencilStateCreateInfo::minDepthBounds/maxDepthBounds
-        command_buffer.setDepthBiasEnable(rendering_state.depth_bias_enabled);
+//        command_buffer.setDepthBiasEnable(rendering_state.depth_bias_enabled);
         //command_buffer.setDepthBias(rendering_state.depth_bias[0],
         //                            rendering_state.depth_bias[1],
         //                            rendering_state.depth_bias[2]);
@@ -244,7 +236,7 @@ struct GraphicsPass {
 
     // Need to add support for inline descriptors
     void UpdateDescriptorSets(vk::raii::Device& device,
-                              vk::DescriptorSet& descriptor_set,
+                              std::vector<vk::DescriptorSet>& descriptor_sets,
                               size_t set_index,
                               const std::vector<std::tuple<size_t, vk::DescriptorBufferInfo>>& buffer_data,
                               const std::vector<std::tuple<size_t, vk::DescriptorImageInfo>>& image_data,
@@ -261,6 +253,7 @@ struct GraphicsPass {
         auto SetTexelF = [](vk::WriteDescriptorSet& data, const vk::BufferView& value) {
             data.pTexelBufferView = std::addressof(value);
         };
+        auto& descriptor_set = descriptor_sets.at(set_index);
         auto CreateF = [&descriptor_set, &set_index, &set_layout_bindings=shader_group.set_layout_bindings](size_t i) {
                 auto& layout = set_layout_bindings.at(set_index).at(i);
                 return vk::WriteDescriptorSet{
