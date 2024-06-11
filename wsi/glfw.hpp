@@ -7,22 +7,10 @@
 #include <tuple>
 #include <vector>
 
-#include "jms/vulkan/vulkan.hpp"
 #include <GLFW/glfw3.h>
 
 
-namespace vk {
-    struct AllocationCallbacks;
-    namespace raii {
-        struct Instance;
-        struct SurfaceKHR;
-    }
-}
-
-
-namespace jms {
-namespace wsi {
-namespace glfw {
+namespace jms::wsi::glfw {
 
 
 struct Environment {
@@ -32,16 +20,13 @@ struct Environment {
     ~Environment() { glfwTerminate(); }
     Environment& operator=(const Environment&) = delete;
     Environment& operator=(Environment&&) = default;
-
-    void EnableHIDPI();
 };
 
 
 struct Window {
     std::unique_ptr<GLFWwindow, decltype(&glfwDestroyWindow)> window{nullptr, &glfwDestroyWindow};
 
-    Window(int width, int height,
-           std::string title=std::string{}, GLFWmonitor* monitor=nullptr, GLFWwindow* share=nullptr) {
+    Window(int width, int height, std::string title={}, GLFWmonitor* monitor=nullptr, GLFWwindow* share=nullptr) {
         window.reset(glfwCreateWindow(width, height, title.c_str(), monitor, share));
         if (!window) { throw std::runtime_error("GLFW failed to create a window."); }
     }
@@ -103,12 +88,4 @@ struct Window {
 };
 
 
-std::vector<std::string> GetVulkanInstanceExtensions();
-vk::raii::SurfaceKHR CreateSurface(Window& window,
-                                   const vk::raii::Instance& instance,
-                                   const vk::AllocationCallbacks* allocator=nullptr);
-
-
-}
-}
 }

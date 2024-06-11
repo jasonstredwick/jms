@@ -9,15 +9,14 @@
 #include "jms/vulkan/info.hpp"
 
 
-namespace jms {
-namespace wsi {
+namespace jms::wsi {
 
 
 jms::vulkan::RenderInfo FromSurface(const vk::raii::SurfaceKHR& surface,
                                     const vk::raii::PhysicalDevice& physical_device,
                                     uint32_t client_width,
                                     uint32_t client_height,
-                                    uint32_t num_images = 3) {
+                                    uint32_t num_images=3) {
     auto surface_formats_vec = physical_device.getSurfaceFormatsKHR(*surface);
     if (surface_formats_vec.empty()) { throw std::runtime_error("No formats found for surface."); }
 
@@ -67,5 +66,4 @@ jms::vulkan::RenderInfo FromSurface(const vk::raii::SurfaceKHR& surface,
 }
 
 
-}
 }
